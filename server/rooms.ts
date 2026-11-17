@@ -1,13 +1,15 @@
 import crypto from 'node:crypto';
-import type {
-  BonusWordEntry,
-  ChatMessage,
-  Difficulty,
-  GridCellView,
-  HintResult,
-  RoomPlayer,
-  RoomStatePayload,
-  SubmitWordResult,
+import {
+  WORD_TOPICS,
+  type BonusWordEntry,
+  type ChatMessage,
+  type Difficulty,
+  type GridCellView,
+  type HintResult,
+  type RoomPlayer,
+  type RoomStatePayload,
+  type SubmitWordResult,
+  type WordTopic,
 } from '../shared/types.ts';
 import { generateCrossword, type GeneratedCrossword } from './crossword.ts';
 import { getDictionary, normalizeInputWord } from './dictionary.ts';
@@ -36,8 +38,10 @@ interface InternalPlayer {
 interface InternalRoom {
   code: string;
   difficulty: Difficulty;
+  topic: WordTopic;
   levelNumber: number;
   crossword: GeneratedCrossword;
+  usedBaseWords: Set<string>;
   openCells: Map<string, { letter: string; revealedBy?: string; isHinted?: boolean }>;
   solvedWords: Map<string, { solvedBy: string }>;
   bonusSet: Set<string>;
@@ -70,6 +74,20 @@ export function sanitizeRoomCode(raw: unknown): string | null {
 export function sanitizeDifficulty(raw: unknown): Difficulty {
   if (raw === 'easy' || raw === 'medium' || raw === 'hard') return raw;
   return 'medium';
+}
+
+export function sanitizeTopic(raw: unknown): WordTopic {
+  if (
+    raw === 'all' ||
+    raw === 'summer' ||
+    raw === 'nature' ||
+    raw === 'travel' ||
+    raw === 'home' ||
+    raw === 'science'
+  ) {
+    return raw;
+  }
+  return 'all';
 }
 
 export function sanitizeScore(raw: unknown): number {
@@ -123,12 +141,14 @@ export class RoomManager {
     nickname: string;
     personalScore: number;
     difficulty: Difficulty;
+    topic?: WordTopic;
   }): RoomStatePayload {
     this.detachSocket(params.socketId);
 
     const code = this.generateUniqueCode();
     const difficulty = sanitizeDifficulty(params.difficulty);
-    const crossword = generateCrossword(difficulty, getDictionary());
+    const topic = sanitizeTopic(params.topic);
+    const crossword = generateCrossword(difficulty, getDictionary(), { topic });
 
     const player: InternalPlayer = {
       playerId: sanitizeText(params.playerId, 64, crypto.randomUUID()),
@@ -146,8 +166,10 @@ export class RoomManager {
     const room: InternalRoom = {
       code,
       difficulty,
+      topic,
       levelNumber: 1,
       crossword,
+      usedBaseWords: new Set([crossword.baseWord]),
       openCells: new Map(),
       solvedWords: new Map(),
       bonusSet: new Set(crossword.bonusWords),
@@ -258,6 +280,42 @@ export class RoomManager {
     this.addSystemMessage(room, `${nickname} присоединился к комнате`);
 
     return { ok: true, state: this.serializeRoom(room), reconnected: false };
+  }
+
+  public renamePlayer(
+    socketId: string,
+    rawNickname: unknown
+  ):
+    | { ok: true; roomCode: string; nickname: string; state: RoomStatePayload }
+    | { ok: false; error: string } {
+    const ctx = this.getPlayerContext(socketId);
+    if (!ctx) return { ok: false, error: 'Вы не в комнате' };
+
+    const newNick = sanitizeText(rawNickname, 20);
+    if (!newNick) {
+      return { ok: false, error: 'Введите корректное имя (от 1 до 20 символов)' };
+    }
+
+    const { room, player } = ctx;
+    const oldNick = player.nickname;
+    if (oldNick === newNick) {
+      return {
+        ok: true,
+        roomCode: room.code,
+        nickname: newNick,
+        state: this.serializeRoom(room),
+      };
+    }
+
+    player.nickname = newNick;
+    this.addSystemMessage(room, `${oldNick} сменил(а) имя на ${newNick}`);
+
+    return {
+      ok: true,
+      roomCode: room.code,
+      nickname: newNick,
+      state: this.serializeRoom(room),
+    };
   }
 
   public leaveRoomBySocket(
@@ -691,25 +749,25 @@ export class RoomManager {
     };
   }
 
-  public nextLevel(
-    socketId: string,
-    rawDifficulty?: unknown
-  ): { ok: true; roomCode: string; state: RoomStatePayload } | { ok: false; error: string } {
-    const ctx = this.getPlayerContext(socketId);
-    if (!ctx) return { ok: false, error: 'Вы не в комнате' };
-
-    const { room, player } = ctx;
-    if (!player.isHost) {
-      return { ok: false, error: 'Только хост может запустить новый уровень' };
+  private resetRoomCrossword(
+    room: InternalRoom,
+    nextDifficulty: Difficulty,
+    nextTopic: WordTopic,
+    incrementLevel: boolean
+  ): void {
+    if (room.usedBaseWords.size > 200) {
+      room.usedBaseWords.clear();
     }
-
-    const nextDifficulty = rawDifficulty
-      ? sanitizeDifficulty(rawDifficulty)
-      : room.difficulty;
-
-    const crossword = generateCrossword(nextDifficulty, getDictionary());
+    const crossword = generateCrossword(nextDifficulty, getDictionary(), {
+      topic: nextTopic,
+      excludeBaseWords: room.usedBaseWords,
+    });
+    room.usedBaseWords.add(crossword.baseWord);
     room.difficulty = nextDifficulty;
-    room.levelNumber += 1;
+    room.topic = nextTopic;
+    if (incrementLevel) {
+      room.levelNumber += 1;
+    }
     room.crossword = crossword;
     room.openCells = new Map();
     room.solvedWords = new Map();
@@ -729,11 +787,58 @@ export class RoomManager {
         : nextDifficulty === 'medium'
           ? 'Средний'
           : 'Сложный';
+    const topicLabel =
+      WORD_TOPICS.find((t) => t.id === nextTopic)?.label ?? 'Все слова';
+
     this.addSystemMessage(
       room,
-      `Хост запустил уровень #${room.levelNumber} (${diffLabel})`
+      incrementLevel
+        ? `Хост запустил уровень #${room.levelNumber} (${topicLabel} · ${diffLabel})`
+        : `Хост пересоздал уровень #${room.levelNumber} (${topicLabel} · ${diffLabel})`
     );
+  }
 
+  public nextLevel(
+    socketId: string,
+    rawDifficulty?: unknown,
+    rawTopic?: unknown
+  ): { ok: true; roomCode: string; state: RoomStatePayload } | { ok: false; error: string } {
+    const ctx = this.getPlayerContext(socketId);
+    if (!ctx) return { ok: false, error: 'Вы не в комнате' };
+
+    const { room, player } = ctx;
+    if (!player.isHost) {
+      return { ok: false, error: 'Только хост может запустить новый уровень' };
+    }
+
+    const nextDifficulty = rawDifficulty
+      ? sanitizeDifficulty(rawDifficulty)
+      : room.difficulty;
+    const nextTopic = rawTopic ? sanitizeTopic(rawTopic) : room.topic;
+
+    this.resetRoomCrossword(room, nextDifficulty, nextTopic, true);
+    return { ok: true, roomCode: room.code, state: this.serializeRoom(room) };
+  }
+
+  public recreateLevel(
+    socketId: string,
+    rawDifficulty?: unknown,
+    rawTopic?: unknown
+  ): { ok: true; roomCode: string; state: RoomStatePayload } | { ok: false; error: string } {
+    const ctx = this.getPlayerContext(socketId);
+    if (!ctx) return { ok: false, error: 'Вы не в комнате' };
+
+    const { room, player } = ctx;
+    if (!player.isHost) {
+      return { ok: false, error: 'Только хост может пересоздать уровень' };
+    }
+
+    const nextDifficulty = rawDifficulty
+      ? sanitizeDifficulty(rawDifficulty)
+      : room.difficulty;
+    const nextTopic = rawTopic ? sanitizeTopic(rawTopic) : room.topic;
+
+    this.resetRoomCrossword(room, nextDifficulty, nextTopic, false);
     return { ok: true, roomCode: room.code, state: this.serializeRoom(room) };
   }
 
@@ -811,6 +916,7 @@ export class RoomManager {
     return {
       code: room.code,
       difficulty: room.difficulty,
+      topic: room.topic,
       levelNumber: room.levelNumber,
       wheelLetters: room.crossword.wheelLetters.map((ch) => ch.toUpperCase()),
       grid: {

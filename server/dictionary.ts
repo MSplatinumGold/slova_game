@@ -1,16 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const RUSSIAN_ALPHABET = 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя';
+export const RUSSIAN_ALPHABET = 'абвгдежзийклмнопрстуфхцчшщъыьэюя';
 
 const CHAR_TO_INDEX = new Map<string, number>();
 for (let i = 0; i < RUSSIAN_ALPHABET.length; i++) {
   CHAR_TO_INDEX.set(RUSSIAN_ALPHABET[i], i);
 }
+// Treat 'ё' as equivalent to 'е'
+CHAR_TO_INDEX.set('ё', CHAR_TO_INDEX.get('е')!);
+
+export function normalizeYo(word: string): string {
+  return word.replace(/ё/g, 'е').replace(/Ё/g, 'Е');
+}
 
 export interface DictEntry {
   word: string;
-  tier: 1 | 2 | 3;
+  tier: 1 | 2;
   len: number;
   maskLo: number; // bits 0..30
   maskHi: number; // bits 31..32
@@ -30,7 +36,7 @@ export function isValidRussianWord(word: string): boolean {
 }
 
 export function normalizeInputWord(raw: string): string {
-  return raw.trim().toLowerCase();
+  return normalizeYo(raw.trim().toLowerCase());
 }
 
 export function computeWordSignature(word: string): {
@@ -40,7 +46,7 @@ export function computeWordSignature(word: string): {
 } {
   let maskLo = 0;
   let maskHi = 0;
-  const counts = new Uint8Array(33);
+  const counts = new Uint8Array(32);
   for (let i = 0; i < word.length; i++) {
     const idx = CHAR_TO_INDEX.get(word[i]);
     if (idx === undefined) continue;
@@ -74,7 +80,9 @@ export class RussianDictionary {
     const parsed = JSON.parse(raw) as Array<{ w: string; t: 1 | 2 | 3 }>;
 
     for (const item of parsed) {
-      const w = item.w;
+      // Exclude ultra-hard / obscure tier 3 words
+      if (item.t !== 1 && item.t !== 2) continue;
+      const w = normalizeYo(item.w);
       if (!isValidRussianWord(w)) continue;
       if (this.wordMap.has(w)) continue;
 
@@ -96,10 +104,10 @@ export class RussianDictionary {
         this.baseCandidates.easy.push(entry);
       }
       // Medium: 6-7 letters, tier 1 or 2
-      if (entry.len >= 6 && entry.len <= 7 && entry.tier <= 2) {
+      if (entry.len >= 6 && entry.len <= 7) {
         this.baseCandidates.medium.push(entry);
       }
-      // Hard: 7-9 letters, any tier (prefer words with <= 2 rare repeats, variety)
+      // Hard: 7-9 letters, tier 1 or 2 (no obscure tier 3 words)
       if (entry.len >= 7 && entry.len <= 9) {
         this.baseCandidates.hard.push(entry);
       }
@@ -107,18 +115,19 @@ export class RussianDictionary {
   }
 
   public has(word: string): boolean {
-    return this.wordMap.has(word);
+    return this.wordMap.has(normalizeInputWord(word));
   }
 
   /**
    * Returns all dictionary words formable from `baseWord`'s multiset of letters.
-   * Strictly distinguishes 'е' and 'ё'.
+   * Treats 'е' and 'ё' as equivalent.
    */
   public findSubwords(baseWord: string): DictEntry[] {
-    const { maskLo, maskHi, counts } = computeWordSignature(baseWord);
+    const normalized = normalizeInputWord(baseWord);
+    const { maskLo, maskHi, counts } = computeWordSignature(normalized);
     const invLo = ~maskLo;
     const invHi = ~maskHi;
-    const maxLen = baseWord.length;
+    const maxLen = normalized.length;
     const result: DictEntry[] = [];
 
     for (let i = 0; i < this.entries.length; i++) {

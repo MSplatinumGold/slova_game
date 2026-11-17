@@ -1,14 +1,21 @@
 import { useState } from 'react';
 import { Award, Crown, ArrowRight } from 'lucide-react';
-import type { Difficulty, RoomPlayer } from '../../shared/types';
+import {
+  WORD_TOPICS,
+  type Difficulty,
+  type RoomPlayer,
+  type WordTopic,
+} from '../../shared/types';
 
 interface VictoryModalProps {
   levelNumber: number;
   currentDifficulty: Difficulty;
+  currentTopic: WordTopic;
   players: RoomPlayer[];
+  currentPlayerId: string;
   bonusCount: number;
   isHost: boolean;
-  onNextLevel: (difficulty: Difficulty) => void;
+  onNextLevel: (difficulty: Difficulty, topic: WordTopic) => void;
   loadingNext: boolean;
 }
 
@@ -21,7 +28,9 @@ const DIFF_LABELS: Record<Difficulty, string> = {
 export function VictoryModal({
   levelNumber,
   currentDifficulty,
+  currentTopic,
   players,
+  currentPlayerId,
   bonusCount,
   isHost,
   onNextLevel,
@@ -29,6 +38,7 @@ export function VictoryModal({
 }: VictoryModalProps) {
   const [selectedDiff, setSelectedDiff] =
     useState<Difficulty>(currentDifficulty);
+  const [selectedTopic, setSelectedTopic] = useState<WordTopic>(currentTopic);
 
   const sortedPlayers = [...players].sort(
     (a, b) => b.roundWordsFound - a.roundWordsFound || b.roundScore - a.roundScore
@@ -48,7 +58,9 @@ export function VictoryModal({
           </div>
           <div>
             <p className="text-xs font-medium text-amber-300">
-              Уровень #{levelNumber} пройден · {DIFF_LABELS[currentDifficulty]}
+              Уровень #{levelNumber} пройден ·{' '}
+              {WORD_TOPICS.find((t) => t.id === currentTopic)?.label ?? 'Все слова'} ·{' '}
+              {DIFF_LABELS[currentDifficulty]}
             </p>
             <h2
               id="victory-title"
@@ -74,6 +86,7 @@ export function VictoryModal({
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="truncate font-semibold text-white">
                     {p.nickname}
+                    {p.playerId === currentPlayerId ? ' (вы)' : ''}
                   </span>
                   {p.isHost && (
                     <Crown className="h-3.5 w-3.5 shrink-0 text-amber-300" />
@@ -114,10 +127,30 @@ export function VictoryModal({
               })}
             </div>
 
+            <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-white/10 bg-slate-950/60 p-1 sm:grid-cols-3">
+              {WORD_TOPICS.map((t) => {
+                const active = selectedTopic === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setSelectedTopic(t.id)}
+                    className={`min-h-[36px] rounded-lg px-2 text-xs font-semibold transition truncate ${
+                      active
+                        ? 'bg-white/20 text-white'
+                        : 'text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
+            </div>
+
             <button
               type="button"
               disabled={loadingNext}
-              onClick={() => onNextLevel(selectedDiff)}
+              onClick={() => onNextLevel(selectedDiff, selectedTopic)}
               className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 text-sm font-bold text-slate-950 transition hover:bg-amber-300 active:scale-[0.99] disabled:opacity-50 whitespace-nowrap"
             >
               <span>

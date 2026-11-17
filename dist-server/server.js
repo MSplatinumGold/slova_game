@@ -7,10 +7,14 @@ import { Server as SocketIOServer } from "socket.io";
 // server/dictionary.ts
 import fs from "node:fs";
 import path from "node:path";
-var RUSSIAN_ALPHABET = "\u0430\u0431\u0432\u0433\u0434\u0435\u0451\u0436\u0437\u0438\u0439\u043A\u043B\u043C\u043D\u043E\u043F\u0440\u0441\u0442\u0443\u0444\u0445\u0446\u0447\u0448\u0449\u044A\u044B\u044C\u044D\u044E\u044F";
+var RUSSIAN_ALPHABET = "\u0430\u0431\u0432\u0433\u0434\u0435\u0436\u0437\u0438\u0439\u043A\u043B\u043C\u043D\u043E\u043F\u0440\u0441\u0442\u0443\u0444\u0445\u0446\u0447\u0448\u0449\u044A\u044B\u044C\u044D\u044E\u044F";
 var CHAR_TO_INDEX = /* @__PURE__ */ new Map();
 for (let i = 0; i < RUSSIAN_ALPHABET.length; i++) {
   CHAR_TO_INDEX.set(RUSSIAN_ALPHABET[i], i);
+}
+CHAR_TO_INDEX.set("\u0451", CHAR_TO_INDEX.get("\u0435"));
+function normalizeYo(word) {
+  return word.replace(/ё/g, "\u0435").replace(/Ё/g, "\u0415");
 }
 function charIndex(ch) {
   return CHAR_TO_INDEX.get(ch) ?? -1;
@@ -23,12 +27,12 @@ function isValidRussianWord(word) {
   return true;
 }
 function normalizeInputWord(raw) {
-  return raw.trim().toLowerCase();
+  return normalizeYo(raw.trim().toLowerCase());
 }
 function computeWordSignature(word) {
   let maskLo = 0;
   let maskHi = 0;
-  const counts = new Uint8Array(33);
+  const counts = new Uint8Array(32);
   for (let i = 0; i < word.length; i++) {
     const idx = CHAR_TO_INDEX.get(word[i]);
     if (idx === void 0) continue;
@@ -54,7 +58,8 @@ var RussianDictionary = class {
     const raw = fs.readFileSync(resolvedPath, "utf-8");
     const parsed = JSON.parse(raw);
     for (const item of parsed) {
-      const w = item.w;
+      if (item.t !== 1 && item.t !== 2) continue;
+      const w = normalizeYo(item.w);
       if (!isValidRussianWord(w)) continue;
       if (this.wordMap.has(w)) continue;
       const { maskLo, maskHi, counts } = computeWordSignature(w);
@@ -71,7 +76,7 @@ var RussianDictionary = class {
       if (entry.len >= 4 && entry.len <= 5 && entry.tier === 1) {
         this.baseCandidates.easy.push(entry);
       }
-      if (entry.len >= 6 && entry.len <= 7 && entry.tier <= 2) {
+      if (entry.len >= 6 && entry.len <= 7) {
         this.baseCandidates.medium.push(entry);
       }
       if (entry.len >= 7 && entry.len <= 9) {
@@ -80,17 +85,18 @@ var RussianDictionary = class {
     }
   }
   has(word) {
-    return this.wordMap.has(word);
+    return this.wordMap.has(normalizeInputWord(word));
   }
   /**
    * Returns all dictionary words formable from `baseWord`'s multiset of letters.
-   * Strictly distinguishes 'е' and 'ё'.
+   * Treats 'е' and 'ё' as equivalent.
    */
   findSubwords(baseWord) {
-    const { maskLo, maskHi, counts } = computeWordSignature(baseWord);
+    const normalized = normalizeInputWord(baseWord);
+    const { maskLo, maskHi, counts } = computeWordSignature(normalized);
     const invLo = ~maskLo;
     const invHi = ~maskHi;
-    const maxLen = baseWord.length;
+    const maxLen = normalized.length;
     const result = [];
     for (let i = 0; i < this.entries.length; i++) {
       const e = this.entries[i];
@@ -122,11 +128,504 @@ function getDictionary() {
 // server/rooms.ts
 import crypto from "node:crypto";
 
+// shared/types.ts
+var WORD_TOPICS = [
+  { id: "all", label: "\u0412\u0441\u0435 \u0441\u043B\u043E\u0432\u0430" },
+  { id: "summer", label: "\u041B\u0435\u0442\u043E" },
+  { id: "nature", label: "\u041F\u0440\u0438\u0440\u043E\u0434\u0430" },
+  { id: "travel", label: "\u041F\u0443\u0442\u0435\u0448\u0435\u0441\u0442\u0432\u0438\u044F" },
+  { id: "home", label: "\u0414\u043E\u043C \u0438 \u0443\u044E\u0442" },
+  { id: "science", label: "\u041A\u043E\u0441\u043C\u043E\u0441 \u0438 \u043D\u0430\u0443\u043A\u0430" }
+];
+
+// server/themes.ts
+var RAW_TOPIC_WORDS = {
+  summer: [
+    "\u043C\u043E\u0440\u0435",
+    "\u043F\u043B\u044F\u0436",
+    "\u0436\u0430\u0440\u0430",
+    "\u043B\u0435\u0442\u043E",
+    "\u0434\u0430\u0447\u0430",
+    "\u0440\u0435\u043A\u0430",
+    "\u0432\u043E\u043B\u043D\u0430",
+    "\u043F\u0435\u0441\u043E\u043A",
+    "\u0437\u0430\u0433\u0430\u0440",
+    "\u0432\u0435\u0442\u0435\u0440",
+    "\u0433\u0440\u043E\u0437\u0430",
+    "\u0437\u0430\u043A\u0430\u0442",
+    "\u043F\u0438\u043A\u043D\u0438\u043A",
+    "\u0430\u0440\u0431\u0443\u0437",
+    "\u044F\u0433\u043E\u0434\u0430",
+    "\u043A\u0430\u0442\u0435\u0440",
+    "\u043B\u043E\u0434\u043A\u0430",
+    "\u0431\u0435\u0440\u0435\u0433",
+    "\u0440\u044B\u0431\u043A\u0430",
+    "\u043A\u043E\u0441\u0442\u0435\u0440",
+    "\u0440\u0430\u0434\u0443\u0433\u0430",
+    "\u0441\u043E\u043B\u043D\u0446\u0435",
+    "\u043E\u0431\u043B\u0430\u043A\u043E",
+    "\u043F\u043E\u043B\u044F\u043D\u0430",
+    "\u0442\u0440\u0430\u0432\u043A\u0430",
+    "\u0446\u0432\u0435\u0442\u043E\u043A",
+    "\u043C\u0430\u043B\u0438\u043D\u0430",
+    "\u0432\u0438\u0448\u043D\u044F",
+    "\u0447\u0435\u0440\u0435\u0448\u043D\u044F",
+    "\u043F\u0430\u043B\u0430\u0442\u043A\u0430",
+    "\u043E\u0441\u0442\u0440\u043E\u0432",
+    "\u043E\u0442\u043F\u0443\u0441\u043A",
+    "\u043F\u0440\u0438\u0431\u043E\u0439",
+    "\u0441\u0438\u0440\u0435\u043D\u044C",
+    "\u043B\u0430\u043D\u0434\u044B\u0448",
+    "\u043A\u0430\u043D\u0438\u043A\u0443\u043B\u044B",
+    "\u0440\u043E\u043C\u0430\u0448\u043A\u0430",
+    "\u0431\u0430\u0431\u043E\u0447\u043A\u0430",
+    "\u043B\u0430\u0441\u0442\u043E\u0447\u043A\u0430",
+    "\u043F\u043E\u0434\u0441\u043E\u043B\u043D\u0443\u0445",
+    "\u0437\u0435\u043C\u043B\u044F\u043D\u0438\u043A\u0430",
+    "\u043C\u043E\u0440\u043E\u0436\u0435\u043D\u043E\u0435",
+    "\u0432\u0438\u043D\u043E\u0433\u0440\u0430\u0434",
+    "\u0430\u043F\u0435\u043B\u044C\u0441\u0438\u043D",
+    "\u0447\u0435\u0440\u0435\u043F\u0430\u0445\u0430",
+    "\u0432\u0435\u043B\u043E\u0441\u0438\u043F\u0435\u0434",
+    "\u043F\u0440\u043E\u0433\u0443\u043B\u043A\u0430",
+    "\u043A\u0443\u043F\u0430\u043B\u044C\u043D\u0438\u043A",
+    "\u0430\u043A\u0432\u0430\u043F\u0430\u0440\u043A",
+    "\u0441\u0430\u0440\u0430\u0444\u0430\u043D",
+    "\u043B\u0438\u043C\u043E\u043D\u0430\u0434",
+    "\u0441\u0442\u0440\u0435\u043A\u043E\u0437\u0430",
+    "\u0442\u0435\u043F\u043B\u043E",
+    "\u0441\u043B\u0438\u0432\u0430",
+    "\u043F\u0430\u0440\u043A",
+    "\u0433\u0430\u0437\u043E\u043D",
+    "\u043B\u0435\u0439\u043A\u0430",
+    "\u0433\u0430\u043C\u0430\u043A",
+    "\u0431\u0435\u0441\u0435\u0434\u043A\u0430",
+    "\u0440\u0430\u0441\u0441\u0432\u0435\u0442",
+    "\u0438\u044E\u043B\u044C",
+    "\u0438\u044E\u043D\u044C",
+    "\u0430\u0432\u0433\u0443\u0441\u0442",
+    "\u043E\u0442\u0434\u044B\u0445",
+    "\u043F\u043E\u0445\u043E\u0434",
+    "\u0443\u0434\u043E\u0447\u043A\u0430",
+    "\u0440\u044B\u0431\u0430\u043B\u043A\u0430",
+    "\u043A\u043B\u0443\u0431\u043D\u0438\u043A\u0430",
+    "\u0441\u043C\u043E\u0440\u043E\u0434\u0438\u043D\u0430",
+    "\u0447\u0435\u0440\u043D\u0438\u043A\u0430",
+    "\u043F\u0435\u0440\u0441\u0438\u043A",
+    "\u0430\u0431\u0440\u0438\u043A\u043E\u0441",
+    "\u0434\u044B\u043D\u044F",
+    "\u043A\u0443\u0440\u043E\u0440\u0442",
+    "\u0431\u0430\u0441\u0441\u0435\u0439\u043D",
+    "\u043F\u0430\u043D\u0430\u043C\u0430",
+    "\u043A\u0435\u043F\u043A\u0430",
+    "\u043C\u0430\u0439\u043A\u0430",
+    "\u0448\u043E\u0440\u0442\u044B",
+    "\u0444\u043E\u043D\u0442\u0430\u043D",
+    "\u0431\u0443\u043A\u0435\u0442",
+    "\u0433\u0440\u044F\u0434\u043A\u0430",
+    "\u043E\u0433\u043E\u0440\u043E\u0434",
+    "\u0442\u0440\u0430\u0432\u0430",
+    "\u0441\u0430\u0434",
+    "\u043B\u0443\u0447",
+    "\u0437\u043E\u043D\u0442",
+    "\u043A\u043E\u043C\u0430\u0440",
+    "\u043F\u0447\u0435\u043B\u0430",
+    "\u043C\u0435\u0434"
+  ],
+  nature: [
+    "\u043B\u0435\u0441",
+    "\u0433\u043E\u0440\u0430",
+    "\u0441\u043D\u0435\u0433",
+    "\u0442\u0443\u043C\u0430\u043D",
+    "\u0440\u043E\u0441\u0430",
+    "\u0433\u0440\u0438\u0431",
+    "\u0434\u0443\u0431",
+    "\u0435\u043B\u043A\u0430",
+    "\u0441\u043E\u0432\u0430",
+    "\u0432\u043E\u043B\u043A",
+    "\u043B\u0438\u0441\u0430",
+    "\u0440\u0435\u0447\u043A\u0430",
+    "\u0432\u0435\u0441\u043D\u0430",
+    "\u043E\u0441\u0435\u043D\u044C",
+    "\u0437\u0438\u043C\u0430",
+    "\u0432\u0435\u0442\u0435\u0440",
+    "\u0434\u043E\u0436\u0434\u044C",
+    "\u043C\u043E\u0440\u043E\u0437",
+    "\u043E\u0437\u0435\u0440\u043E",
+    "\u0440\u0443\u0447\u0435\u0439",
+    "\u0441\u043E\u0441\u043D\u0430",
+    "\u0431\u0435\u0440\u0435\u0437\u0430",
+    "\u043E\u043B\u0435\u043D\u044C",
+    "\u0441\u043A\u0430\u043B\u0430",
+    "\u0442\u0440\u043E\u043F\u0430",
+    "\u0437\u0432\u0435\u0437\u0434\u0430",
+    "\u0442\u0430\u0439\u0433\u0430",
+    "\u0431\u043E\u043B\u043E\u0442\u043E",
+    "\u043A\u043E\u0440\u0435\u043D\u044C",
+    "\u0432\u0435\u0442\u043A\u0430",
+    "\u043B\u0438\u0441\u0442\u0432\u0430",
+    "\u043C\u0435\u0434\u0432\u0435\u0434\u044C",
+    "\u0432\u043E\u0440\u043E\u043D\u0430",
+    "\u0440\u044F\u0431\u0438\u043D\u0430",
+    "\u043F\u043E\u043B\u044F\u043D\u0430",
+    "\u0434\u043E\u043B\u0438\u043D\u0430",
+    "\u0432\u043E\u0434\u043E\u043F\u0430\u0434",
+    "\u0432\u0435\u0440\u0448\u0438\u043D\u0430",
+    "\u0440\u0430\u0441\u0441\u0432\u0435\u0442",
+    "\u043B\u0435\u0434\u043D\u0438\u043A",
+    "\u0441\u0443\u0433\u0440\u043E\u0431",
+    "\u0442\u0443\u043D\u0434\u0440\u0430",
+    "\u0440\u043E\u0434\u043D\u0438\u043A",
+    "\u0442\u0440\u043E\u043F\u0438\u043D\u043A\u0430",
+    "\u0437\u0430\u043F\u043E\u0432\u0435\u0434\u043D\u0438\u043A",
+    "\u043B\u0438\u0441\u0438\u0447\u043A\u0430",
+    "\u0431\u0435\u043B\u043E\u0447\u043A\u0430",
+    "\u043C\u0443\u0440\u0430\u0432\u0435\u0439",
+    "\u0432\u043E\u0440\u043E\u0431\u0435\u0439",
+    "\u0441\u043E\u043B\u043E\u0432\u0435\u0439",
+    "\u043B\u0430\u0432\u0438\u043D\u0430",
+    "\u0433\u0440\u043E\u0437\u0430",
+    "\u0440\u0430\u0434\u0443\u0433\u0430",
+    "\u0433\u043E\u0440\u0438\u0437\u043E\u043D\u0442",
+    "\u043E\u0441\u0438\u043D\u0430",
+    "\u043A\u043B\u0435\u043D",
+    "\u044F\u0441\u0435\u043D\u044C",
+    "\u043F\u0438\u0445\u0442\u0430",
+    "\u043A\u0435\u0434\u0440",
+    "\u043B\u0438\u043F\u0430",
+    "\u0442\u043E\u043F\u043E\u043B\u044C",
+    "\u0442\u0440\u0430\u0432\u0430",
+    "\u043A\u0440\u043E\u043D\u0430",
+    "\u043A\u043E\u0440\u0430",
+    "\u0448\u0438\u0448\u043A\u0430",
+    "\u043E\u0440\u0435\u0445",
+    "\u043A\u043B\u044E\u043A\u0432\u0430",
+    "\u0431\u0440\u0443\u0441\u043D\u0438\u043A\u0430",
+    "\u0440\u0430\u0432\u043D\u0438\u043D\u0430",
+    "\u043F\u0443\u0441\u0442\u044B\u043D\u044F",
+    "\u0441\u0442\u0435\u043F\u044C",
+    "\u043E\u0432\u0440\u0430\u0433",
+    "\u0445\u043E\u043B\u043C",
+    "\u0443\u0442\u0435\u0441",
+    "\u043F\u0435\u0449\u0435\u0440\u0430",
+    "\u043E\u0431\u043B\u0430\u043A\u043E",
+    "\u043C\u043E\u043B\u043D\u0438\u044F",
+    "\u0433\u0440\u043E\u043C",
+    "\u0437\u0432\u0435\u0440\u044C",
+    "\u043F\u0442\u0438\u0446\u0430",
+    "\u0431\u0435\u043B\u043A\u0430",
+    "\u0437\u0430\u044F\u0446",
+    "\u043A\u0430\u0431\u0430\u043D",
+    "\u043B\u043E\u0441\u044C",
+    "\u043B\u0435\u0431\u0435\u0434\u044C",
+    "\u0436\u0443\u0440\u0430\u0432\u043B\u044C",
+    "\u0430\u0438\u0441\u0442",
+    "\u0441\u0438\u043D\u0438\u0446\u0430",
+    "\u0441\u043D\u0435\u0433\u0438\u0440\u044C",
+    "\u0434\u044F\u0442\u0435\u043B",
+    "\u044F\u0441\u0442\u0440\u0435\u0431",
+    "\u0441\u043E\u043A\u043E\u043B"
+  ],
+  travel: [
+    "\u043C\u043E\u0441\u0442",
+    "\u043F\u0430\u0440\u043A",
+    "\u043F\u043E\u0440\u0442",
+    "\u043C\u0430\u044F\u043A",
+    "\u0440\u0435\u0439\u0441",
+    "\u0442\u0440\u0430\u043F",
+    "\u0442\u0440\u043E\u043F\u0430",
+    "\u043A\u0430\u0440\u0442\u0430",
+    "\u043F\u043E\u0435\u0437\u0434",
+    "\u043A\u0430\u044E\u0442\u0430",
+    "\u043F\u0430\u0440\u0443\u0441",
+    "\u044F\u043A\u043E\u0440\u044C",
+    "\u0431\u0438\u043B\u0435\u0442",
+    "\u0432\u0430\u0433\u043E\u043D",
+    "\u0431\u0430\u0433\u0430\u0436",
+    "\u0433\u043E\u0440\u043E\u0434",
+    "\u043C\u0443\u0437\u0435\u0439",
+    "\u0437\u0430\u043C\u043E\u043A",
+    "\u0431\u0435\u0440\u0435\u0433",
+    "\u043E\u0442\u0435\u043B\u044C",
+    "\u043A\u043E\u043C\u043F\u0430\u0441",
+    "\u0432\u043E\u043A\u0437\u0430\u043B",
+    "\u0434\u043E\u0440\u043E\u0433\u0430",
+    "\u043E\u0441\u0442\u0440\u043E\u0432",
+    "\u0441\u0442\u0440\u0430\u043D\u0430",
+    "\u0433\u0440\u0430\u043D\u0438\u0446\u0430",
+    "\u0441\u0442\u043E\u043B\u0438\u0446\u0430",
+    "\u043F\u0430\u0440\u043E\u0445\u043E\u0434",
+    "\u0441\u0430\u043C\u043E\u043B\u0435\u0442",
+    "\u043A\u043E\u0440\u0430\u0431\u043B\u044C",
+    "\u0447\u0435\u043C\u043E\u0434\u0430\u043D",
+    "\u043F\u0440\u0438\u0447\u0430\u043B",
+    "\u0433\u0430\u0432\u0430\u043D\u044C",
+    "\u043F\u0430\u043B\u0443\u0431\u0430",
+    "\u0448\u0442\u0443\u0440\u0432\u0430\u043B",
+    "\u0442\u0443\u0440\u0438\u0441\u0442",
+    "\u0440\u044E\u043A\u0437\u0430\u043A",
+    "\u043F\u0440\u0438\u0432\u0430\u043B",
+    "\u043C\u0430\u0440\u0448\u0440\u0443\u0442",
+    "\u043F\u043B\u043E\u0449\u0430\u0434\u044C",
+    "\u0430\u044D\u0440\u043E\u043F\u043E\u0440\u0442",
+    "\u044D\u043A\u0441\u043A\u0443\u0440\u0441\u0438\u044F",
+    "\u043F\u0443\u0441\u0442\u044B\u043D\u044F",
+    "\u043F\u0435\u0440\u0435\u0432\u0430\u043B",
+    "\u0433\u043E\u0441\u0442\u0438\u043D\u0438\u0446\u0430",
+    "\u043F\u0440\u043E\u0433\u0443\u043B\u043A\u0430",
+    "\u0442\u0440\u0430\u043C\u0432\u0430\u0439",
+    "\u0442\u0435\u043F\u043B\u043E\u0445\u043E\u0434",
+    "\u043A\u043E\u0440\u0430\u0431\u043B\u0438\u043A",
+    "\u043F\u0435\u0440\u0435\u043B\u0435\u0442",
+    "\u043F\u0443\u0442\u043D\u0438\u043A",
+    "\u043A\u0430\u0442\u0435\u0440",
+    "\u043B\u043E\u0434\u043A\u0430",
+    "\u043F\u0430\u0440\u043E\u043C",
+    "\u043C\u0435\u0442\u0440\u043E",
+    "\u0442\u0430\u043A\u0441\u0438",
+    "\u0430\u0432\u0442\u043E\u0431\u0443\u0441",
+    "\u044D\u043A\u0441\u043F\u0440\u0435\u0441\u0441",
+    "\u043F\u0435\u0440\u0440\u043E\u043D",
+    "\u043A\u0430\u0441\u0441\u0430",
+    "\u0441\u0443\u043C\u043A\u0430",
+    "\u0433\u043B\u043E\u0431\u0443\u0441",
+    "\u0448\u043E\u0441\u0441\u0435",
+    "\u0442\u0440\u0430\u0441\u0441\u0430",
+    "\u0443\u043B\u0438\u0446\u0430",
+    "\u043F\u0440\u043E\u0441\u043F\u0435\u043A\u0442",
+    "\u0431\u0443\u043B\u044C\u0432\u0430\u0440",
+    "\u0437\u0430\u043B\u0438\u0432",
+    "\u0431\u0443\u0445\u0442\u0430",
+    "\u043F\u0440\u043E\u043B\u0438\u0432",
+    "\u043C\u0430\u0442\u0435\u0440\u0438\u043A",
+    "\u0442\u0430\u043C\u043E\u0436\u043D\u044F",
+    "\u043F\u0430\u0441\u043F\u043E\u0440\u0442",
+    "\u0432\u0438\u0437\u0430",
+    "\u0445\u043E\u0441\u0442\u0435\u043B",
+    "\u043A\u0435\u043C\u043F\u0438\u043D\u0433",
+    "\u043F\u0430\u043B\u0430\u0442\u043A\u0430",
+    "\u0441\u0443\u0432\u0435\u043D\u0438\u0440",
+    "\u043E\u0442\u043A\u0440\u044B\u0442\u043A\u0430",
+    "\u043A\u0440\u0443\u0438\u0437",
+    "\u043F\u0443\u0442\u0435\u0432\u043A\u0430",
+    "\u0440\u0435\u0439\u0434",
+    "\u0442\u0443\u0440",
+    "\u043F\u0443\u0442\u044C",
+    "\u0442\u0440\u0430\u043A\u0442"
+  ],
+  home: [
+    "\u0434\u043E\u043C",
+    "\u0441\u0442\u043E\u043B",
+    "\u0441\u0442\u0443\u043B",
+    "\u043E\u043A\u043D\u043E",
+    "\u0448\u043A\u0430\u0444",
+    "\u043F\u043B\u0435\u0434",
+    "\u0447\u0430\u0439",
+    "\u043A\u043E\u0444\u0435",
+    "\u0445\u043B\u0435\u0431",
+    "\u0442\u043E\u0440\u0442",
+    "\u0441\u044B\u0440",
+    "\u0441\u0443\u043F",
+    "\u0434\u0438\u0432\u0430\u043D",
+    "\u043B\u0430\u043C\u043F\u0430",
+    "\u0441\u0432\u0435\u0447\u0430",
+    "\u043A\u043D\u0438\u0433\u0430",
+    "\u0447\u0430\u0448\u043A\u0430",
+    "\u043F\u0438\u0440\u043E\u0433",
+    "\u043A\u043E\u0432\u0435\u0440",
+    "\u043F\u043E\u043B\u043A\u0430",
+    "\u0434\u0432\u0435\u0440\u044C",
+    "\u043A\u0443\u0445\u043D\u044F",
+    "\u0443\u0436\u0438\u043D",
+    "\u043E\u0431\u0435\u0434",
+    "\u043A\u0430\u0448\u0430",
+    "\u0447\u0430\u0439\u043D\u0438\u043A",
+    "\u043A\u0440\u0435\u0441\u043B\u043E",
+    "\u0437\u0435\u0440\u043A\u0430\u043B\u043E",
+    "\u043A\u0430\u0440\u0442\u0438\u043D\u0430",
+    "\u043F\u043E\u0434\u0443\u0448\u043A\u0430",
+    "\u043A\u043E\u043C\u043D\u0430\u0442\u0430",
+    "\u0432\u0430\u0440\u0435\u043D\u044C\u0435",
+    "\u0437\u0430\u0432\u0442\u0440\u0430\u043A",
+    "\u043C\u043E\u043B\u043E\u043A\u043E",
+    "\u044F\u0431\u043B\u043E\u043A\u043E",
+    "\u0442\u0430\u0440\u0435\u043B\u043A\u0430",
+    "\u0431\u0430\u043B\u043A\u043E\u043D",
+    "\u043A\u0430\u043C\u0438\u043D",
+    "\u043A\u0430\u043A\u0430\u043E",
+    "\u043F\u043E\u0441\u0443\u0434\u0430",
+    "\u043F\u0435\u0447\u0435\u043D\u044C\u0435",
+    "\u0431\u0443\u043B\u043E\u0447\u043A\u0430",
+    "\u043A\u043E\u043D\u0444\u0435\u0442\u0430",
+    "\u043E\u0434\u0435\u044F\u043B\u043E",
+    "\u043A\u0440\u043E\u0432\u0430\u0442\u044C",
+    "\u0437\u0430\u043D\u0430\u0432\u0435\u0441",
+    "\u0441\u043A\u0430\u0442\u0435\u0440\u0442\u044C",
+    "\u0441\u0430\u043B\u0444\u0435\u0442\u043A\u0430",
+    "\u043A\u0430\u0441\u0442\u0440\u044E\u043B\u044F",
+    "\u0441\u043A\u043E\u0432\u043E\u0440\u043E\u0434\u0430",
+    "\u0441\u0432\u0435\u0442\u0438\u043B\u044C\u043D\u0438\u043A",
+    "\u0445\u043E\u043B\u043E\u0434\u0438\u043B\u044C\u043D\u0438\u043A",
+    "\u0442\u0435\u043B\u0435\u0432\u0438\u0437\u043E\u0440",
+    "\u0433\u043E\u0441\u0442\u0438\u043D\u0430\u044F",
+    "\u0441\u043F\u0430\u043B\u044C\u043D\u044F",
+    "\u043F\u0440\u0438\u0445\u043E\u0436\u0430\u044F",
+    "\u043B\u0435\u0441\u0442\u043D\u0438\u0446\u0430",
+    "\u043A\u0440\u044B\u043B\u044C\u0446\u043E",
+    "\u0431\u0430\u0442\u043E\u043D",
+    "\u043C\u0430\u0441\u043B\u043E",
+    "\u043B\u043E\u0436\u043A\u0430",
+    "\u0432\u0438\u043B\u043A\u0430",
+    "\u043F\u043B\u0438\u0442\u0430",
+    "\u0440\u0430\u043C\u043A\u0430",
+    "\u0434\u043E\u0441\u043A\u0430",
+    "\u0441\u044B\u0440\u043E\u043A",
+    "\u0441\u0430\u043B\u0430\u0442",
+    "\u0431\u0430\u043D\u043A\u0430",
+    "\u0442\u0443\u043C\u0431\u0430",
+    "\u0448\u0442\u043E\u0440\u0430",
+    "\u0432\u043E\u0440\u043E\u0442\u0430",
+    "\u0432\u0435\u0440\u0430\u043D\u0434\u0430",
+    "\u043C\u0430\u043D\u0433\u0430\u043B",
+    "\u043A\u0430\u0447\u0435\u043B\u0438",
+    "\u043E\u0433\u0440\u0430\u0434\u0430",
+    "\u0442\u0432\u043E\u0440\u043E\u0433",
+    "\u0441\u043C\u0435\u0442\u0430\u043D\u0430",
+    "\u043F\u0440\u044F\u043D\u0438\u043A",
+    "\u0432\u0430\u0442\u0440\u0443\u0448\u043A\u0430",
+    "\u0442\u0443\u043C\u0431\u043E\u0447\u043A\u0430",
+    "\u0443\u044E\u0442",
+    "\u0442\u0435\u043F\u043B\u043E",
+    "\u0441\u0432\u0435\u0442",
+    "\u0441\u043E\u043D"
+  ],
+  science: [
+    "\u0430\u0442\u043E\u043C",
+    "\u0441\u0432\u0435\u0442",
+    "\u0437\u0432\u0443\u043A",
+    "\u043A\u043E\u0434",
+    "\u043B\u0443\u043D\u0430",
+    "\u043C\u0430\u0440\u0441",
+    "\u043B\u0443\u0447",
+    "\u0442\u043E\u043A",
+    "\u0441\u0438\u043B\u0430",
+    "\u0432\u0435\u0441",
+    "\u043D\u0430\u0443\u043A\u0430",
+    "\u043A\u043E\u0441\u043C\u043E\u0441",
+    "\u0437\u0432\u0435\u0437\u0434\u0430",
+    "\u0440\u0430\u043A\u0435\u0442\u0430",
+    "\u043E\u0440\u0431\u0438\u0442\u0430",
+    "\u043F\u0440\u0438\u0431\u043E\u0440",
+    "\u0440\u043E\u0431\u043E\u0442",
+    "\u043C\u0430\u0433\u043D\u0438\u0442",
+    "\u044D\u043A\u0440\u0430\u043D",
+    "\u0432\u0440\u0435\u043C\u044F",
+    "\u0444\u0438\u0437\u0438\u043A\u0430",
+    "\u0445\u0438\u043C\u0438\u044F",
+    "\u043F\u043B\u0430\u043D\u0435\u0442\u0430",
+    "\u0441\u043F\u0443\u0442\u043D\u0438\u043A",
+    "\u043A\u043E\u043C\u0435\u0442\u0430",
+    "\u043C\u0435\u0442\u0435\u043E\u0440",
+    "\u0441\u0435\u0440\u0432\u0435\u0440",
+    "\u0441\u0438\u0433\u043D\u0430\u043B",
+    "\u043B\u0430\u0437\u0435\u0440",
+    "\u0441\u043F\u0435\u043A\u0442\u0440",
+    "\u0432\u0430\u043A\u0443\u0443\u043C",
+    "\u0444\u043E\u0442\u043E\u043D",
+    "\u043F\u0440\u043E\u0442\u043E\u043D",
+    "\u043D\u0435\u0439\u0442\u0440\u043E\u043D",
+    "\u043A\u0440\u0438\u0441\u0442\u0430\u043B\u043B",
+    "\u0444\u043E\u0440\u043C\u0443\u043B\u0430",
+    "\u0442\u0435\u043B\u0435\u0441\u043A\u043E\u043F",
+    "\u0433\u0430\u043B\u0430\u043A\u0442\u0438\u043A\u0430",
+    "\u0432\u0441\u0435\u043B\u0435\u043D\u043D\u0430\u044F",
+    "\u043A\u043E\u043C\u043F\u044C\u044E\u0442\u0435\u0440",
+    "\u043F\u0440\u043E\u0433\u0440\u0430\u043C\u043C\u0430",
+    "\u044D\u043D\u0435\u0440\u0433\u0438\u044F",
+    "\u043C\u043E\u043B\u0435\u043A\u0443\u043B\u0430",
+    "\u044D\u043B\u0435\u043A\u0442\u0440\u043E\u043D",
+    "\u043C\u0438\u043A\u0440\u043E\u0441\u043A\u043E\u043F",
+    "\u0440\u0435\u0430\u043A\u0442\u043E\u0440",
+    "\u0434\u0430\u0442\u0447\u0438\u043A",
+    "\u0430\u043B\u0433\u043E\u0440\u0438\u0442\u043C",
+    "\u0438\u043D\u0442\u0435\u0440\u043D\u0435\u0442",
+    "\u043F\u043B\u0430\u043D\u0435\u0442\u0430\u0440\u0438\u0439",
+    "\u0430\u0441\u0442\u0440\u043E\u043D\u043E\u043C",
+    "\u0441\u0445\u0435\u043C\u0430",
+    "\u043A\u0430\u0440\u0442\u0430",
+    "\u043C\u043E\u0442\u043E\u0440",
+    "\u0440\u0430\u0434\u0438\u043E",
+    "\u043C\u0435\u0442\u043E\u0434",
+    "\u0447\u0438\u0441\u043B\u043E",
+    "\u043E\u043F\u044B\u0442",
+    "\u043A\u043D\u043E\u043F\u043A\u0430",
+    "\u043A\u0430\u0431\u0435\u043B\u044C",
+    "\u0434\u0438\u0441\u043A",
+    "\u043F\u043B\u0430\u0442\u0430",
+    "\u0431\u0430\u0439\u0442",
+    "\u0432\u0438\u0440\u0443\u0441",
+    "\u043B\u043E\u0433\u0438\u043A\u0430",
+    "\u0444\u0430\u043A\u0442\u043E\u0440",
+    "\u043C\u043E\u0434\u0435\u043B\u044C",
+    "\u0441\u0438\u0441\u0442\u0435\u043C\u0430",
+    "\u0433\u0440\u0430\u0444\u0438\u043A",
+    "\u0447\u0435\u0440\u0442\u0435\u0436",
+    "\u0432\u0435\u043A\u0442\u043E\u0440",
+    "\u0440\u0430\u0434\u0438\u0443\u0441",
+    "\u0441\u0444\u0435\u0440\u0430",
+    "\u043B\u0438\u043D\u0437\u0430",
+    "\u043F\u0440\u0438\u0437\u043C\u0430",
+    "\u043C\u0430\u044F\u0442\u043D\u0438\u043A",
+    "\u043A\u043E\u043C\u043F\u0430\u0441",
+    "\u0433\u0435\u043D\u0435\u0440\u0430\u0442\u043E\u0440",
+    "\u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0430",
+    "\u0434\u0438\u043D\u0430\u043C\u0438\u043A\u0430",
+    "\u044D\u043B\u0435\u043C\u0435\u043D\u0442",
+    "\u043A\u0432\u0430\u043D\u0442",
+    "\u0438\u043C\u043F\u0443\u043B\u044C\u0441"
+  ]
+};
+var cachedTopicIndex = /* @__PURE__ */ new WeakMap();
+function getTopicIndex(topic, dict) {
+  if (topic === "all") return null;
+  let map = cachedTopicIndex.get(dict);
+  if (!map) {
+    const built = {};
+    for (const key of Object.keys(RAW_TOPIC_WORDS)) {
+      const wordSet = /* @__PURE__ */ new Set();
+      const entries = [];
+      for (const raw of RAW_TOPIC_WORDS[key]) {
+        const w = normalizeYo(raw.trim().toLowerCase());
+        if (wordSet.has(w)) continue;
+        const entry = dict.wordMap.get(w);
+        if (entry) {
+          wordSet.add(w);
+          entries.push(entry);
+        }
+      }
+      const easy = entries.filter((e) => e.len >= 4 && e.len <= 5);
+      const medium = entries.filter((e) => e.len >= 6 && e.len <= 7);
+      const hard = entries.filter((e) => e.len >= 7 && e.len <= 9);
+      built[key] = {
+        wordSet,
+        baseCandidates: {
+          easy: easy.length > 0 ? easy : entries.filter((e) => e.len >= 4 && e.len <= 6),
+          medium: medium.length > 0 ? medium : entries.filter((e) => e.len >= 5 && e.len <= 8),
+          hard: hard.length > 0 ? hard : entries.filter((e) => e.len >= 6 && e.len <= 9)
+        }
+      };
+    }
+    cachedTopicIndex.set(dict, built);
+    map = built;
+  }
+  return map[topic] ?? null;
+}
+
 // server/crossword.ts
 var DIFFICULTY_SPECS = {
   easy: { minWords: 4, maxWords: 7, minSubwordsPool: 5, maxGridTier: 2 },
   medium: { minWords: 7, maxWords: 11, minSubwordsPool: 10, maxGridTier: 2 },
-  hard: { minWords: 10, maxWords: 15, minSubwordsPool: 16, maxGridTier: 3 }
+  hard: { minWords: 10, maxWords: 15, minSubwordsPool: 14, maxGridTier: 2 }
 };
 var GRID_DIM = 64;
 var GRID_CENTER = 32;
@@ -271,12 +770,12 @@ function scoreLayout(placed, intersections) {
   const aspectPenalty = Math.abs(width - height) * 1.5;
   return placed.length * 25 + intersections * 18 - area * 0.25 - aspectPenalty;
 }
-function buildGridForBaseWord(baseWord, candidates, spec, budgetMs) {
+function buildGridForBaseWord(baseWord, candidates, spec, budgetMs, themeWordSet) {
   const startTime = performance.now();
   const targetCount = spec.minWords + Math.floor(Math.random() * (spec.maxWords - spec.minWords + 1));
   const pool = candidates.filter((e) => e.word !== baseWord && e.tier <= spec.maxGridTier).map((e) => ({
     entry: e,
-    weight: (4 - e.tier) * 10 + e.len * 2 + Math.random() * 14
+    weight: (themeWordSet?.has(e.word) ? 24 : 0) + (4 - e.tier) * 10 + e.len * 2 + Math.random() * 14
   })).sort((a, b) => b.weight - a.weight).map((x) => x.entry.word);
   if (pool.length < spec.minWords + 4) {
     const extra = candidates.filter((e) => e.word !== baseWord && e.tier > spec.maxGridTier).map((e) => e.word);
@@ -346,19 +845,30 @@ function buildGridForBaseWord(baseWord, candidates, spec, budgetMs) {
   }
   return null;
 }
-function generateCrossword(difficulty, dict = getDictionary()) {
+function generateCrossword(difficulty, dict = getDictionary(), options) {
   const startTime = performance.now();
+  const topic = options?.topic ?? "all";
+  const exclude = options?.excludeBaseWords;
   const spec = DIFFICULTY_SPECS[difficulty];
-  const pool = dict.baseCandidates[difficulty];
+  const topicIdx = getTopicIndex(topic, dict);
+  const rawPool = topicIdx ? topicIdx.baseCandidates[difficulty] : dict.baseCandidates[difficulty];
+  const nonExcluded = exclude ? rawPool.filter((c) => !exclude.has(c.word)) : rawPool;
+  const pool = nonExcluded.length > 0 ? nonExcluded : rawPool;
   let bestResult = null;
-  const maxAttempts = 24;
+  const maxAttempts = 28;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0 && performance.now() - startTime > 200) break;
     const candidate = pool[Math.floor(Math.random() * pool.length)];
     const subwords = dict.findSubwords(candidate.word);
     const tierFiltered = subwords.filter((s) => s.tier <= spec.maxGridTier);
     if (tierFiltered.length < spec.minSubwordsPool) continue;
-    const layout = buildGridForBaseWord(candidate.word, subwords, spec, 45);
+    const layout = buildGridForBaseWord(
+      candidate.word,
+      subwords,
+      spec,
+      45,
+      topicIdx?.wordSet
+    );
     if (!layout) continue;
     if (!bestResult || layout.score > bestResult.score) {
       bestResult = {
@@ -373,20 +883,30 @@ function generateCrossword(difficulty, dict = getDictionary()) {
     }
   }
   if (!bestResult) {
-    for (let i = 0; i < pool.length; i++) {
-      const candidate = pool[i];
-      const subwords = dict.findSubwords(candidate.word);
-      if (subwords.length < spec.minSubwordsPool) continue;
-      const layout = buildGridForBaseWord(candidate.word, subwords, spec, 50);
-      if (layout) {
-        bestResult = {
-          baseWord: candidate.word,
+    const fallbackPools = topicIdx ? [pool, dict.baseCandidates[difficulty]] : [pool];
+    for (const fbPool of fallbackPools) {
+      for (let i = 0; i < fbPool.length; i++) {
+        const candidate = fbPool[i];
+        const subwords = dict.findSubwords(candidate.word);
+        if (subwords.length < spec.minSubwordsPool) continue;
+        const layout = buildGridForBaseWord(
+          candidate.word,
           subwords,
-          placed: layout.placed,
-          score: layout.score
-        };
-        break;
+          spec,
+          50,
+          topicIdx?.wordSet
+        );
+        if (layout) {
+          bestResult = {
+            baseWord: candidate.word,
+            subwords,
+            placed: layout.placed,
+            score: layout.score
+          };
+          break;
+        }
       }
+      if (bestResult) break;
     }
   }
   if (!bestResult) {
@@ -417,6 +937,7 @@ function generateCrossword(difficulty, dict = getDictionary()) {
   const wheelLetters = shuffleInPlace(bestResult.baseWord.split(""));
   return {
     difficulty,
+    topic,
     baseWord: bestResult.baseWord,
     wheelLetters,
     rows: maxRow - minRow + 1,
@@ -449,6 +970,12 @@ function sanitizeRoomCode(raw) {
 function sanitizeDifficulty(raw) {
   if (raw === "easy" || raw === "medium" || raw === "hard") return raw;
   return "medium";
+}
+function sanitizeTopic(raw) {
+  if (raw === "all" || raw === "summer" || raw === "nature" || raw === "travel" || raw === "home" || raw === "science") {
+    return raw;
+  }
+  return "all";
 }
 function sanitizeScore(raw) {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return 0;
@@ -492,7 +1019,8 @@ var RoomManager = class {
     this.detachSocket(params.socketId);
     const code = this.generateUniqueCode();
     const difficulty = sanitizeDifficulty(params.difficulty);
-    const crossword = generateCrossword(difficulty, getDictionary());
+    const topic = sanitizeTopic(params.topic);
+    const crossword = generateCrossword(difficulty, getDictionary(), { topic });
     const player = {
       playerId: sanitizeText(params.playerId, 64, crypto.randomUUID()),
       socketId: params.socketId,
@@ -508,8 +1036,10 @@ var RoomManager = class {
     const room = {
       code,
       difficulty,
+      topic,
       levelNumber: 1,
       crossword,
+      usedBaseWords: /* @__PURE__ */ new Set([crossword.baseWord]),
       openCells: /* @__PURE__ */ new Map(),
       solvedWords: /* @__PURE__ */ new Map(),
       bonusSet: new Set(crossword.bonusWords),
@@ -598,6 +1128,32 @@ var RoomManager = class {
     });
     this.addSystemMessage(room, `${nickname} \u043F\u0440\u0438\u0441\u043E\u0435\u0434\u0438\u043D\u0438\u043B\u0441\u044F \u043A \u043A\u043E\u043C\u043D\u0430\u0442\u0435`);
     return { ok: true, state: this.serializeRoom(room), reconnected: false };
+  }
+  renamePlayer(socketId, rawNickname) {
+    const ctx = this.getPlayerContext(socketId);
+    if (!ctx) return { ok: false, error: "\u0412\u044B \u043D\u0435 \u0432 \u043A\u043E\u043C\u043D\u0430\u0442\u0435" };
+    const newNick = sanitizeText(rawNickname, 20);
+    if (!newNick) {
+      return { ok: false, error: "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043A\u043E\u0440\u0440\u0435\u043A\u0442\u043D\u043E\u0435 \u0438\u043C\u044F (\u043E\u0442 1 \u0434\u043E 20 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432)" };
+    }
+    const { room, player } = ctx;
+    const oldNick = player.nickname;
+    if (oldNick === newNick) {
+      return {
+        ok: true,
+        roomCode: room.code,
+        nickname: newNick,
+        state: this.serializeRoom(room)
+      };
+    }
+    player.nickname = newNick;
+    this.addSystemMessage(room, `${oldNick} \u0441\u043C\u0435\u043D\u0438\u043B(\u0430) \u0438\u043C\u044F \u043D\u0430 ${newNick}`);
+    return {
+      ok: true,
+      roomCode: room.code,
+      nickname: newNick,
+      state: this.serializeRoom(room)
+    };
   }
   leaveRoomBySocket(socketId) {
     const link = this.socketToPlayer.get(socketId);
@@ -944,17 +1500,20 @@ var RoomManager = class {
       }
     };
   }
-  nextLevel(socketId, rawDifficulty) {
-    const ctx = this.getPlayerContext(socketId);
-    if (!ctx) return { ok: false, error: "\u0412\u044B \u043D\u0435 \u0432 \u043A\u043E\u043C\u043D\u0430\u0442\u0435" };
-    const { room, player } = ctx;
-    if (!player.isHost) {
-      return { ok: false, error: "\u0422\u043E\u043B\u044C\u043A\u043E \u0445\u043E\u0441\u0442 \u043C\u043E\u0436\u0435\u0442 \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u043D\u043E\u0432\u044B\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C" };
+  resetRoomCrossword(room, nextDifficulty, nextTopic, incrementLevel) {
+    if (room.usedBaseWords.size > 200) {
+      room.usedBaseWords.clear();
     }
-    const nextDifficulty = rawDifficulty ? sanitizeDifficulty(rawDifficulty) : room.difficulty;
-    const crossword = generateCrossword(nextDifficulty, getDictionary());
+    const crossword = generateCrossword(nextDifficulty, getDictionary(), {
+      topic: nextTopic,
+      excludeBaseWords: room.usedBaseWords
+    });
+    room.usedBaseWords.add(crossword.baseWord);
     room.difficulty = nextDifficulty;
-    room.levelNumber += 1;
+    room.topic = nextTopic;
+    if (incrementLevel) {
+      room.levelNumber += 1;
+    }
     room.crossword = crossword;
     room.openCells = /* @__PURE__ */ new Map();
     room.solvedWords = /* @__PURE__ */ new Map();
@@ -967,10 +1526,34 @@ var RoomManager = class {
       p.roundScore = 0;
     }
     const diffLabel = nextDifficulty === "easy" ? "\u041B\u0451\u0433\u043A\u0438\u0439" : nextDifficulty === "medium" ? "\u0421\u0440\u0435\u0434\u043D\u0438\u0439" : "\u0421\u043B\u043E\u0436\u043D\u044B\u0439";
+    const topicLabel = WORD_TOPICS.find((t) => t.id === nextTopic)?.label ?? "\u0412\u0441\u0435 \u0441\u043B\u043E\u0432\u0430";
     this.addSystemMessage(
       room,
-      `\u0425\u043E\u0441\u0442 \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u043B \u0443\u0440\u043E\u0432\u0435\u043D\u044C #${room.levelNumber} (${diffLabel})`
+      incrementLevel ? `\u0425\u043E\u0441\u0442 \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u043B \u0443\u0440\u043E\u0432\u0435\u043D\u044C #${room.levelNumber} (${topicLabel} \xB7 ${diffLabel})` : `\u0425\u043E\u0441\u0442 \u043F\u0435\u0440\u0435\u0441\u043E\u0437\u0434\u0430\u043B \u0443\u0440\u043E\u0432\u0435\u043D\u044C #${room.levelNumber} (${topicLabel} \xB7 ${diffLabel})`
     );
+  }
+  nextLevel(socketId, rawDifficulty, rawTopic) {
+    const ctx = this.getPlayerContext(socketId);
+    if (!ctx) return { ok: false, error: "\u0412\u044B \u043D\u0435 \u0432 \u043A\u043E\u043C\u043D\u0430\u0442\u0435" };
+    const { room, player } = ctx;
+    if (!player.isHost) {
+      return { ok: false, error: "\u0422\u043E\u043B\u044C\u043A\u043E \u0445\u043E\u0441\u0442 \u043C\u043E\u0436\u0435\u0442 \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u043D\u043E\u0432\u044B\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C" };
+    }
+    const nextDifficulty = rawDifficulty ? sanitizeDifficulty(rawDifficulty) : room.difficulty;
+    const nextTopic = rawTopic ? sanitizeTopic(rawTopic) : room.topic;
+    this.resetRoomCrossword(room, nextDifficulty, nextTopic, true);
+    return { ok: true, roomCode: room.code, state: this.serializeRoom(room) };
+  }
+  recreateLevel(socketId, rawDifficulty, rawTopic) {
+    const ctx = this.getPlayerContext(socketId);
+    if (!ctx) return { ok: false, error: "\u0412\u044B \u043D\u0435 \u0432 \u043A\u043E\u043C\u043D\u0430\u0442\u0435" };
+    const { room, player } = ctx;
+    if (!player.isHost) {
+      return { ok: false, error: "\u0422\u043E\u043B\u044C\u043A\u043E \u0445\u043E\u0441\u0442 \u043C\u043E\u0436\u0435\u0442 \u043F\u0435\u0440\u0435\u0441\u043E\u0437\u0434\u0430\u0442\u044C \u0443\u0440\u043E\u0432\u0435\u043D\u044C" };
+    }
+    const nextDifficulty = rawDifficulty ? sanitizeDifficulty(rawDifficulty) : room.difficulty;
+    const nextTopic = rawTopic ? sanitizeTopic(rawTopic) : room.topic;
+    this.resetRoomCrossword(room, nextDifficulty, nextTopic, false);
     return { ok: true, roomCode: room.code, state: this.serializeRoom(room) };
   }
   addChatMessage(socketId, rawText) {
@@ -1032,6 +1615,7 @@ var RoomManager = class {
     return {
       code: room.code,
       difficulty: room.difficulty,
+      topic: room.topic,
       levelNumber: room.levelNumber,
       wheelLetters: room.crossword.wheelLetters.map((ch) => ch.toUpperCase()),
       grid: {
@@ -1124,7 +1708,8 @@ async function startServer() {
             playerId: payload?.playerId ?? "",
             nickname: payload?.nickname ?? "\u0418\u0433\u0440\u043E\u043A",
             personalScore: payload?.personalScore ?? 0,
-            difficulty: sanitizeDifficulty(payload?.difficulty)
+            difficulty: sanitizeDifficulty(payload?.difficulty),
+            topic: sanitizeTopic(payload?.topic)
           });
           socket.join(state.code);
           safeCallback(cb, { ok: true, state });
@@ -1180,6 +1765,27 @@ async function startServer() {
         safeCallback(cb, { ok: false });
       }
     });
+    socket.on(
+      "room:rename",
+      (payload, cb) => {
+        try {
+          if (!rateLimiter.allow(`${socket.id}:rename`, 8, 1e4)) {
+            safeCallback(cb, { ok: false, error: "\u0421\u043B\u0438\u0448\u043A\u043E\u043C \u0447\u0430\u0441\u0442\u0430\u044F \u0441\u043C\u0435\u043D\u0430 \u0438\u043C\u0435\u043D\u0438" });
+            return;
+          }
+          const res = roomManager.renamePlayer(socket.id, payload?.nickname);
+          if (!res.ok) {
+            safeCallback(cb, res);
+            return;
+          }
+          io.to(res.roomCode).emit("room:state", res.state);
+          safeCallback(cb, { ok: true, nickname: res.nickname, state: res.state });
+        } catch (err) {
+          console.error("[room:rename] error:", err);
+          safeCallback(cb, { ok: false, error: "\u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u043C\u0435\u043D\u044B \u0438\u043C\u0435\u043D\u0438" });
+        }
+      }
+    );
     socket.on(
       "game:submit_word",
       (payload, cb) => {
@@ -1258,7 +1864,11 @@ async function startServer() {
             safeCallback(cb, { ok: false, error: "\u041F\u043E\u0434\u043E\u0436\u0434\u0438\u0442\u0435 \u043D\u0435\u043C\u043D\u043E\u0433\u043E" });
             return;
           }
-          const res = roomManager.nextLevel(socket.id, payload?.difficulty);
+          const res = roomManager.nextLevel(
+            socket.id,
+            payload?.difficulty,
+            payload?.topic
+          );
           if (!res.ok) {
             safeCallback(cb, res);
             return;
@@ -1270,6 +1880,34 @@ async function startServer() {
           safeCallback(cb, {
             ok: false,
             error: "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u0433\u0435\u043D\u0435\u0440\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043D\u043E\u0432\u044B\u0439 \u043A\u0440\u043E\u0441\u0441\u0432\u043E\u0440\u0434"
+          });
+        }
+      }
+    );
+    socket.on(
+      "game:recreate_level",
+      (payload, cb) => {
+        try {
+          if (!rateLimiter.allow(`${socket.id}:recreate`, 6, 1e4)) {
+            safeCallback(cb, { ok: false, error: "\u041F\u043E\u0434\u043E\u0436\u0434\u0438\u0442\u0435 \u043D\u0435\u043C\u043D\u043E\u0433\u043E" });
+            return;
+          }
+          const res = roomManager.recreateLevel(
+            socket.id,
+            payload?.difficulty,
+            payload?.topic
+          );
+          if (!res.ok) {
+            safeCallback(cb, res);
+            return;
+          }
+          io.to(res.roomCode).emit("room:state", res.state);
+          safeCallback(cb, { ok: true, state: res.state });
+        } catch (err) {
+          console.error("[game:recreate_level] error:", err);
+          safeCallback(cb, {
+            ok: false,
+            error: "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u0435\u0440\u0435\u0441\u043E\u0437\u0434\u0430\u0442\u044C \u0443\u0440\u043E\u0432\u0435\u043D\u044C"
           });
         }
       }
@@ -1323,7 +1961,10 @@ async function startServer() {
   } else {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ws: { server }
+      },
       appType: "spa"
     });
     app.use(vite.middlewares);

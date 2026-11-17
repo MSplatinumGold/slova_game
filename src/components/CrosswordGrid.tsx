@@ -120,9 +120,15 @@ export function CrosswordGrid({
           const isOpen = cell.letter !== null;
 
           if (isOpen) {
+            const tileTitle = cell.revealedBy
+              ? cell.isHinted
+                ? `Подсказка: ${cell.revealedBy}`
+                : `Открыл(а): ${cell.revealedBy}`
+              : undefined;
             return (
               <div
                 key={`${r}-${c}`}
+                title={tileTitle}
                 style={{
                   width: cellSize,
                   height: cellSize,

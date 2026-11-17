@@ -39,6 +39,8 @@ export function PlayersList({ players, currentPlayerId }: PlayersListProps) {
                 <span className="text-amber-200/80">связь...</span>
               )}
               <span>{p.roundWordsFound} сл.</span>
+              <span aria-hidden="true" className="text-slate-500">·</span>
+              <span className="text-amber-200/90">+{p.roundScore}</span>
             </div>
           </li>
         );

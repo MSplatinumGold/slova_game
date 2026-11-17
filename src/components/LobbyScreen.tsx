@@ -8,7 +8,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import type { Difficulty } from '../../shared/types';
+import { WORD_TOPICS, type Difficulty, type WordTopic } from '../../shared/types';
 
 interface LobbyScreenProps {
   nickname: string;
@@ -18,7 +18,9 @@ interface LobbyScreenProps {
   onToggleSound: () => void;
   pendingInviteCode: string | null;
   onClearInviteCode: () => void;
-  onCreateRoom: (difficulty: Difficulty) => void;
+  topic: WordTopic;
+  onChangeTopic: (topic: WordTopic) => void;
+  onCreateRoom: (difficulty: Difficulty, topic: WordTopic) => void;
   onJoinRoom: (code: string) => void;
   busy: boolean;
   errorMsg: string | null;
@@ -42,6 +44,8 @@ export function LobbyScreen({
   onToggleSound,
   pendingInviteCode,
   onClearInviteCode,
+  topic,
+  onChangeTopic,
   onCreateRoom,
   onJoinRoom,
   busy,
@@ -61,7 +65,7 @@ export function LobbyScreen({
 
   const handleCreate = () => {
     if (!canSubmitNick || busy) return;
-    onCreateRoom(difficulty);
+    onCreateRoom(difficulty, topic);
   };
 
   const handleCodeInput = (val: string) => {
@@ -122,7 +126,7 @@ export function LobbyScreen({
           <section className="flex flex-col justify-between rounded-3xl bg-slate-900/55 p-6 backdrop-blur-md border border-white/10 sm:p-8 lg:col-span-7">
             <div>
               <p className="text-xs font-medium text-amber-300/90">
-                Русский словарь · Точный учёт Е и Ё
+                Русский словарь · Е = Ё · Тематические фоны
               </p>
               <h1 className="mt-3 font-display text-3xl font-bold leading-tight text-white text-balance sm:text-4xl lg:text-5xl">
                 Разгадывайте кроссворды вместе за одним столом
@@ -277,6 +281,38 @@ export function LobbyScreen({
                           </button>
                         );
                       })}
+                    </div>
+
+                    {/* Topic / Backdrop Filter */}
+                    <div className="space-y-1.5">
+                      <span className="block text-xs font-medium text-slate-300">
+                        Тема слов и фона
+                      </span>
+                      <div
+                        role="radiogroup"
+                        aria-label="Тема слов"
+                        className="grid grid-cols-2 gap-1.5 rounded-xl border border-white/10 bg-slate-950/60 p-1.5 sm:grid-cols-3"
+                      >
+                        {WORD_TOPICS.map((item) => {
+                          const active = topic === item.id;
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              role="radio"
+                              aria-checked={active}
+                              onClick={() => onChangeTopic(item.id)}
+                              className={`min-h-[36px] rounded-lg px-2 py-1.5 text-xs font-semibold transition truncate ${
+                                active
+                                  ? 'bg-amber-400 text-slate-950 shadow-sm'
+                                  : 'text-slate-300 hover:text-white'
+                              }`}
+                            >
+                              {item.label}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
 
                     <button

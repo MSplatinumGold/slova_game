@@ -87,11 +87,13 @@ export function ChatPanel({
                 key={msg.id}
                 className={`flex flex-col ${isMine ? 'items-end' : 'items-start'}`}
               >
-                {!isMine && (
-                  <span className="mb-0.5 px-1 text-[11px] font-medium text-amber-200/90">
-                    {msg.nickname}
-                  </span>
-                )}
+                <span
+                  className={`mb-0.5 px-1 text-[11px] font-medium ${
+                    isMine ? 'text-amber-300/85' : 'text-amber-200/90'
+                  }`}
+                >
+                  {isMine ? `${msg.nickname} (вы)` : msg.nickname}
+                </span>
                 <div
                   className={`max-w-[85%] rounded-2xl px-3.5 py-2 text-xs leading-relaxed break-words sm:text-sm ${
                     isMine

@@ -1,5 +1,6 @@
-import type { Difficulty, WordDirection } from '../shared/types.ts';
+import type { Difficulty, WordDirection, WordTopic } from '../shared/types.ts';
 import { charIndex, type DictEntry, getDictionary, type RussianDictionary } from './dictionary.ts';
+import { getTopicIndex } from './themes.ts';
 
 export interface PlacedWord {
   word: string;
@@ -10,6 +11,7 @@ export interface PlacedWord {
 
 export interface GeneratedCrossword {
   difficulty: Difficulty;
+  topic: WordTopic;
   baseWord: string;
   wheelLetters: string[];
   rows: number;
@@ -29,7 +31,7 @@ interface DifficultySpec {
 const DIFFICULTY_SPECS: Record<Difficulty, DifficultySpec> = {
   easy: { minWords: 4, maxWords: 7, minSubwordsPool: 5, maxGridTier: 2 },
   medium: { minWords: 7, maxWords: 11, minSubwordsPool: 10, maxGridTier: 2 },
-  hard: { minWords: 10, maxWords: 15, minSubwordsPool: 16, maxGridTier: 3 },
+  hard: { minWords: 10, maxWords: 15, minSubwordsPool: 14, maxGridTier: 2 },
 };
 
 const GRID_DIM = 64;
@@ -256,19 +258,21 @@ function buildGridForBaseWord(
   baseWord: string,
   candidates: DictEntry[],
   spec: DifficultySpec,
-  budgetMs: number
+  budgetMs: number,
+  themeWordSet?: Set<string>
 ): { placed: PlacedWord[]; score: number } | null {
   const startTime = performance.now();
   const targetCount =
     spec.minWords +
     Math.floor(Math.random() * (spec.maxWords - spec.minWords + 1));
 
-  // Order candidate words: baseWord first, then tier-prioritized & varied length with randomness
+  // Order candidate words: baseWord first, then theme-prioritized, tier-prioritized & varied length
   const pool = candidates
     .filter((e) => e.word !== baseWord && e.tier <= spec.maxGridTier)
     .map((e) => ({
       entry: e,
       weight:
+        (themeWordSet?.has(e.word) ? 24 : 0) +
         (4 - e.tier) * 10 +
         e.len * 2 +
         Math.random() * 14,
@@ -375,11 +379,25 @@ function buildGridForBaseWord(
 
 export function generateCrossword(
   difficulty: Difficulty,
-  dict: RussianDictionary = getDictionary()
+  dict: RussianDictionary = getDictionary(),
+  options?: {
+    topic?: WordTopic;
+    excludeBaseWords?: Set<string>;
+  }
 ): GeneratedCrossword {
   const startTime = performance.now();
+  const topic: WordTopic = options?.topic ?? 'all';
+  const exclude = options?.excludeBaseWords;
   const spec = DIFFICULTY_SPECS[difficulty];
-  const pool = dict.baseCandidates[difficulty];
+  const topicIdx = getTopicIndex(topic, dict);
+
+  const rawPool = topicIdx
+    ? topicIdx.baseCandidates[difficulty]
+    : dict.baseCandidates[difficulty];
+  const nonExcluded = exclude
+    ? rawPool.filter((c) => !exclude.has(c.word))
+    : rawPool;
+  const pool = nonExcluded.length > 0 ? nonExcluded : rawPool;
 
   let bestResult: {
     baseWord: string;
@@ -388,8 +406,8 @@ export function generateCrossword(
     score: number;
   } | null = null;
 
-  // Try up to 24 random base words within ~220ms budget
-  const maxAttempts = 24;
+  // Try up to 28 random base words within ~220ms budget
+  const maxAttempts = 28;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0 && performance.now() - startTime > 200) break;
 
@@ -400,7 +418,13 @@ export function generateCrossword(
     const tierFiltered = subwords.filter((s) => s.tier <= spec.maxGridTier);
     if (tierFiltered.length < spec.minSubwordsPool) continue;
 
-    const layout = buildGridForBaseWord(candidate.word, subwords, spec, 45);
+    const layout = buildGridForBaseWord(
+      candidate.word,
+      subwords,
+      spec,
+      45,
+      topicIdx?.wordSet
+    );
     if (!layout) continue;
 
     if (!bestResult || layout.score > bestResult.score) {
@@ -418,22 +442,34 @@ export function generateCrossword(
     }
   }
 
-  // Deterministic safe fallback scan if random sampling got unlucky
+  // Deterministic safe fallback scan within topic pool, then full pool
   if (!bestResult) {
-    for (let i = 0; i < pool.length; i++) {
-      const candidate = pool[i];
-      const subwords = dict.findSubwords(candidate.word);
-      if (subwords.length < spec.minSubwordsPool) continue;
-      const layout = buildGridForBaseWord(candidate.word, subwords, spec, 50);
-      if (layout) {
-        bestResult = {
-          baseWord: candidate.word,
+    const fallbackPools = topicIdx
+      ? [pool, dict.baseCandidates[difficulty]]
+      : [pool];
+    for (const fbPool of fallbackPools) {
+      for (let i = 0; i < fbPool.length; i++) {
+        const candidate = fbPool[i];
+        const subwords = dict.findSubwords(candidate.word);
+        if (subwords.length < spec.minSubwordsPool) continue;
+        const layout = buildGridForBaseWord(
+          candidate.word,
           subwords,
-          placed: layout.placed,
-          score: layout.score,
-        };
-        break;
+          spec,
+          50,
+          topicIdx?.wordSet
+        );
+        if (layout) {
+          bestResult = {
+            baseWord: candidate.word,
+            subwords,
+            placed: layout.placed,
+            score: layout.score,
+          };
+          break;
+        }
       }
+      if (bestResult) break;
     }
   }
 
@@ -474,6 +510,7 @@ export function generateCrossword(
 
   return {
     difficulty,
+    topic,
     baseWord: bestResult.baseWord,
     wheelLetters,
     rows: maxRow - minRow + 1,

@@ -6,6 +6,7 @@ import type {
   HintResult,
   RoomStatePayload,
   SubmitWordResult,
+  WordTopic,
 } from '../shared/types';
 import { Backdrop } from './components/Backdrop';
 import { GameRoom } from './components/GameRoom';
@@ -42,6 +43,7 @@ export default function App() {
   const [pendingInviteCode, setPendingInviteCode] = useState<string | null>(() =>
     parseRoomCodeFromUrl()
   );
+  const [lobbyTopic, setLobbyTopic] = useState<WordTopic>('all');
   const [room, setRoom] = useState<RoomStatePayload | null>(null);
   const [connected, setConnected] = useState<boolean>(false);
   const [showWakeupBanner, setShowWakeupBanner] = useState<boolean>(false);
@@ -230,7 +232,7 @@ export default function App() {
     });
   };
 
-  const handleCreateRoom = (difficulty: Difficulty) => {
+  const handleCreateRoom = (difficulty: Difficulty, topic: WordTopic) => {
     const cleanNick = nickname.trim();
     if (!cleanNick) return;
     const socket = getSocket();
@@ -244,6 +246,7 @@ export default function App() {
         nickname: cleanNick,
         personalScore,
         difficulty,
+        topic,
       },
       (res: { ok: boolean; state?: RoomStatePayload; error?: string }) => {
         setBusy(false);
@@ -257,6 +260,31 @@ export default function App() {
         }
       }
     );
+  };
+
+  const handleRenameNickname = (newNickname: string) => {
+    return new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      const socket = getSocket();
+      socket.emit(
+        'room:rename',
+        { nickname: newNickname },
+        (res: {
+          ok: boolean;
+          nickname?: string;
+          state?: RoomStatePayload;
+          error?: string;
+        } | undefined) => {
+          if (res?.ok && res.state) {
+            setRoom(res.state);
+            if (res.nickname) {
+              setNickname(res.nickname);
+              saveNickname(res.nickname);
+            }
+          }
+          resolve({ ok: Boolean(res?.ok), error: res?.error });
+        }
+      );
+    });
   };
 
   const handleLeaveRoom = () => {
@@ -326,12 +354,25 @@ export default function App() {
     });
   };
 
-  const handleNextLevel = (difficulty: Difficulty) => {
+  const handleNextLevel = (difficulty: Difficulty, topic: WordTopic) => {
     return new Promise<{ ok: boolean; error?: string }>((resolve) => {
       const socket = getSocket();
       socket.emit(
         'game:next_level',
-        { difficulty },
+        { difficulty, topic },
+        (res: { ok: boolean; error?: string } | undefined) => {
+          resolve(res ?? { ok: false, error: 'Нет ответа сервера' });
+        }
+      );
+    });
+  };
+
+  const handleRecreateLevel = (difficulty: Difficulty, topic: WordTopic) => {
+    return new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      const socket = getSocket();
+      socket.emit(
+        'game:recreate_level',
+        { difficulty, topic },
         (res: { ok: boolean; error?: string } | undefined) => {
           resolve(res ?? { ok: false, error: 'Нет ответа сервера' });
         }
@@ -346,7 +387,7 @@ export default function App() {
 
   return (
     <div className="relative min-h-dvh w-full text-slate-50">
-      <Backdrop />
+      <Backdrop topic={room ? room.topic : lobbyTopic} />
 
       {room ? (
         <GameRoom
@@ -356,9 +397,11 @@ export default function App() {
           soundEnabled={soundEnabled}
           onToggleSound={handleToggleSound}
           onLeaveRoom={handleLeaveRoom}
+          onRenameNickname={handleRenameNickname}
           onSubmitWord={handleSubmitWord}
           onUseHint={handleUseHint}
           onNextLevel={handleNextLevel}
+          onRecreateLevel={handleRecreateLevel}
           onSendChat={handleSendChat}
           incomingToastMessages={toastMessages}
           gridNotice={gridNotice}
@@ -375,6 +418,8 @@ export default function App() {
             setPendingInviteCode(null);
             window.history.replaceState(null, '', '/');
           }}
+          topic={lobbyTopic}
+          onChangeTopic={setLobbyTopic}
           onCreateRoom={handleCreateRoom}
           onJoinRoom={(code) => joinRoomByCode(code)}
           busy={busy}

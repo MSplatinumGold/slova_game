@@ -3,7 +3,7 @@ import path from 'node:path';
 import express from 'express';
 import { Server as SocketIOServer } from 'socket.io';
 import { getDictionary } from './server/dictionary.ts';
-import { RoomManager, sanitizeDifficulty } from './server/rooms.ts';
+import { RoomManager, sanitizeDifficulty, sanitizeTopic } from './server/rooms.ts';
 import type {
   HintResult,
   RoomStatePayload,
@@ -87,6 +87,7 @@ async function startServer(): Promise<void> {
           nickname?: string;
           personalScore?: number;
           difficulty?: string;
+          topic?: string;
         },
         cb?: unknown
       ) => {
@@ -101,6 +102,7 @@ async function startServer(): Promise<void> {
             nickname: payload?.nickname ?? 'Игрок',
             personalScore: payload?.personalScore ?? 0,
             difficulty: sanitizeDifficulty(payload?.difficulty),
+            topic: sanitizeTopic(payload?.topic),
           });
           socket.join(state.code);
           safeCallback(cb, { ok: true, state });
@@ -166,6 +168,28 @@ async function startServer(): Promise<void> {
         safeCallback(cb, { ok: false });
       }
     });
+
+    socket.on(
+      'room:rename',
+      (payload: { nickname?: string } | undefined, cb?: unknown) => {
+        try {
+          if (!rateLimiter.allow(`${socket.id}:rename`, 8, 10_000)) {
+            safeCallback(cb, { ok: false, error: 'Слишком частая смена имени' });
+            return;
+          }
+          const res = roomManager.renamePlayer(socket.id, payload?.nickname);
+          if (!res.ok) {
+            safeCallback(cb, res);
+            return;
+          }
+          io.to(res.roomCode).emit('room:state', res.state);
+          safeCallback(cb, { ok: true, nickname: res.nickname, state: res.state });
+        } catch (err) {
+          console.error('[room:rename] error:', err);
+          safeCallback(cb, { ok: false, error: 'Ошибка смены имени' });
+        }
+      }
+    );
 
     socket.on(
       'game:submit_word',
@@ -245,13 +269,20 @@ async function startServer(): Promise<void> {
 
     socket.on(
       'game:next_level',
-      (payload: { difficulty?: string } | undefined, cb?: unknown) => {
+      (
+        payload: { difficulty?: string; topic?: string } | undefined,
+        cb?: unknown
+      ) => {
         try {
           if (!rateLimiter.allow(`${socket.id}:next`, 4, 10_000)) {
             safeCallback(cb, { ok: false, error: 'Подождите немного' });
             return;
           }
-          const res = roomManager.nextLevel(socket.id, payload?.difficulty);
+          const res = roomManager.nextLevel(
+            socket.id,
+            payload?.difficulty,
+            payload?.topic
+          );
           if (!res.ok) {
             safeCallback(cb, res);
             return;
@@ -263,6 +294,38 @@ async function startServer(): Promise<void> {
           safeCallback(cb, {
             ok: false,
             error: 'Не удалось сгенерировать новый кроссворд',
+          });
+        }
+      }
+    );
+
+    socket.on(
+      'game:recreate_level',
+      (
+        payload: { difficulty?: string; topic?: string } | undefined,
+        cb?: unknown
+      ) => {
+        try {
+          if (!rateLimiter.allow(`${socket.id}:recreate`, 6, 10_000)) {
+            safeCallback(cb, { ok: false, error: 'Подождите немного' });
+            return;
+          }
+          const res = roomManager.recreateLevel(
+            socket.id,
+            payload?.difficulty,
+            payload?.topic
+          );
+          if (!res.ok) {
+            safeCallback(cb, res);
+            return;
+          }
+          io.to(res.roomCode).emit('room:state', res.state);
+          safeCallback(cb, { ok: true, state: res.state });
+        } catch (err) {
+          console.error('[game:recreate_level] error:', err);
+          safeCallback(cb, {
+            ok: false,
+            error: 'Не удалось пересоздать уровень',
           });
         }
       }
@@ -319,7 +382,10 @@ async function startServer(): Promise<void> {
   } else {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ws: { server },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   BookmarkCheck,
   Check,
   Copy,
+  Crown,
   Hammer,
   Lightbulb,
   LogOut,
   MessageCircle,
+  Pencil,
   RefreshCw,
   Shuffle,
   Trophy,
@@ -15,10 +17,12 @@ import {
   VolumeX,
   X,
 } from 'lucide-react';
-import type {
-  ChatMessage,
-  Difficulty,
-  RoomStatePayload,
+import {
+  WORD_TOPICS,
+  type ChatMessage,
+  type Difficulty,
+  type RoomStatePayload,
+  type WordTopic,
 } from '../../shared/types';
 import { soundEngine } from '../utils/sound';
 import { BonusWordsModal } from './BonusWordsModal';
@@ -35,6 +39,7 @@ interface GameRoomProps {
   soundEnabled: boolean;
   onToggleSound: () => void;
   onLeaveRoom: () => void;
+  onRenameNickname: (nickname: string) => Promise<{ ok: boolean; error?: string }>;
   onSubmitWord: (word: string) => Promise<{
     ok: boolean;
     status: string;
@@ -46,7 +51,14 @@ interface GameRoomProps {
     row?: number,
     col?: number
   ) => Promise<{ ok: boolean; error?: string }>;
-  onNextLevel: (difficulty: Difficulty) => Promise<{ ok: boolean; error?: string }>;
+  onNextLevel: (
+    difficulty: Difficulty,
+    topic: WordTopic
+  ) => Promise<{ ok: boolean; error?: string }>;
+  onRecreateLevel: (
+    difficulty: Difficulty,
+    topic: WordTopic
+  ) => Promise<{ ok: boolean; error?: string }>;
   onSendChat: (text: string) => void;
   incomingToastMessages: ChatMessage[];
   gridNotice: string | null;
@@ -68,9 +80,11 @@ export function GameRoom({
   soundEnabled,
   onToggleSound,
   onLeaveRoom,
+  onRenameNickname,
   onSubmitWord,
   onUseHint,
   onNextLevel,
+  onRecreateLevel,
   onSendChat,
   incomingToastMessages,
   gridNotice,
@@ -95,16 +109,23 @@ export function GameRoom({
   const [hammerMode, setHammerMode] = useState(false);
   const [showBonusModal, setShowBonusModal] = useState(false);
   const [showPlayersSheet, setShowPlayersSheet] = useState(false);
+  const [showRecreateModal, setShowRecreateModal] = useState(false);
+  const [showRenameModal, setShowRenameModal] = useState(false);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [copiedCode, setCopiedCode] = useState(false);
   const [loadingNext, setLoadingNext] = useState(false);
   const [hostDiffChoice, setHostDiffChoice] = useState<Difficulty>(room.difficulty);
+  const [hostTopicChoice, setHostTopicChoice] = useState<WordTopic>(room.topic);
 
   useEffect(() => {
     setHostDiffChoice(room.difficulty);
+    setHostTopicChoice(room.topic);
     setHammerMode(false);
-  }, [room.levelNumber, room.difficulty]);
+  }, [room.levelNumber, room.difficulty, room.topic, room.wheelLetters]);
 
   const prevMsgCountRef = useRef(room.messages.length);
   useEffect(() => {
@@ -187,7 +208,7 @@ export function GameRoom({
       // Do not intercept typing in inputs/textareas (e.g. chat)
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || room.roundComplete) return;
-      if (showBonusModal || showPlayersSheet) return;
+      if (showBonusModal || showPlayersSheet || showRenameModal || showRecreateModal) return;
 
       if (e.key === 'Backspace') {
         e.preventDefault();
@@ -211,11 +232,12 @@ export function GameRoom({
         return;
       }
 
-      const ch = e.key.toUpperCase();
-      if (/^[А-ЯЁ]$/.test(ch)) {
-        // Find an unused wheel index matching this exact letter (Е != Ё)
+      const rawCh = e.key.toUpperCase();
+      // Treat Е and Ё identically
+      const ch = rawCh === 'Ё' ? 'Е' : rawCh;
+      if (/^[А-Я]$/.test(ch)) {
         const availIdx = localLetters.findIndex(
-          (l, idx) => l === ch && !selectedIndices.includes(idx)
+          (l, idx) => (l === 'Ё' ? 'Е' : l) === ch && !selectedIndices.includes(idx)
         );
         if (availIdx !== -1) {
           const next = [...selectedIndices, availIdx];
@@ -233,6 +255,8 @@ export function GameRoom({
     room.roundComplete,
     showBonusModal,
     showPlayersSheet,
+    showRenameModal,
+    showRecreateModal,
     hammerMode,
     submitIndices,
     handleShuffle,
@@ -282,15 +306,49 @@ export function GameRoom({
     }
   };
 
-  const handleNextLevelTrigger = async (diff: Difficulty) => {
+  const handleNextLevelTrigger = async (diff: Difficulty, topic: WordTopic) => {
     setLoadingNext(true);
-    await onNextLevel(diff);
+    await onNextLevel(diff, topic);
     setLoadingNext(false);
+  };
+
+  const handleRecreateLevelTrigger = async (diff: Difficulty, topic: WordTopic) => {
+    setLoadingNext(true);
+    const res = await onRecreateLevel(diff, topic);
+    setLoadingNext(false);
+    if (!res.ok && res.error) {
+      showFeedback(res.error, 'error', true);
+    }
+  };
+
+  const openRenameModal = () => {
+    setRenameDraft(me?.nickname ?? '');
+    setRenameError(null);
+    setShowRenameModal(true);
+  };
+
+  const handleSubmitRename = async (e: FormEvent) => {
+    e.preventDefault();
+    const trimmed = renameDraft.trim();
+    if (!trimmed) {
+      setRenameError('Введите имя от 1 до 20 символов');
+      return;
+    }
+    setRenaming(true);
+    const res = await onRenameNickname(trimmed);
+    setRenaming(false);
+    if (res.ok) {
+      setShowRenameModal(false);
+    } else {
+      setRenameError(res.error ?? 'Не удалось сменить имя');
+    }
   };
 
   const activeWord = selectedIndices.map((i) => localLetters[i] ?? '').join('');
   const lightbulbPaid = room.sharedHints === 0;
   const hammerPaid = room.sharedHints === 0;
+  const currentTopicLabel =
+    WORD_TOPICS.find((t) => t.id === room.topic)?.label ?? 'Все слова';
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden">
@@ -327,6 +385,8 @@ export function GameRoom({
           <div className="hidden lg:flex items-center gap-2 pl-2 text-xs text-slate-300 whitespace-nowrap">
             <span>Уровень #{room.levelNumber}</span>
             <span aria-hidden="true">·</span>
+            <span>{currentTopicLabel}</span>
+            <span aria-hidden="true">·</span>
             <span>{DIFF_LABELS[room.difficulty]}</span>
             <span aria-hidden="true">·</span>
             <span className="tabular-nums">
@@ -335,23 +395,50 @@ export function GameRoom({
           </div>
         </div>
 
-        {/* Right: Hints + Score + Sound + Leave */}
+        {/* Right: Hints + Nickname + Score + Recreate(mobile host) + Sound + Leave */}
         <div className="flex items-center gap-1.5 shrink-0">
           <div
             title="Общие бесплатные подсказки комнаты"
-            className="flex items-center gap-1 px-2 text-xs font-semibold text-amber-200 tabular-nums whitespace-nowrap"
+            className="flex items-center gap-1 px-1.5 text-xs font-semibold text-amber-200 tabular-nums whitespace-nowrap"
           >
             <Lightbulb className="h-3.5 w-3.5 text-amber-300" />
             <span>{room.sharedHints}</span>
           </div>
 
+          {me && (
+            <button
+              type="button"
+              onClick={openRenameModal}
+              title="Нажмите, чтобы сменить ник"
+              aria-label="Сменить ник"
+              className="flex h-9 items-center gap-1 rounded-xl border border-white/10 bg-white/8 px-2 text-xs font-semibold text-amber-200 transition hover:bg-white/15"
+            >
+              <span className="max-w-[78px] sm:max-w-[140px] truncate">
+                {me.nickname}
+              </span>
+              <Pencil className="h-3 w-3 shrink-0 text-slate-300" />
+            </button>
+          )}
+
           <div
             title="Ваши личные очки"
-            className="flex items-center gap-1 px-2 text-xs font-semibold text-white tabular-nums whitespace-nowrap"
+            className="flex items-center gap-1 px-1.5 text-xs font-semibold text-white tabular-nums whitespace-nowrap"
           >
             <Trophy className="h-3.5 w-3.5 text-amber-300" />
             <span>{personalScore}</span>
           </div>
+
+          {isHost && (
+            <button
+              type="button"
+              onClick={() => setShowRecreateModal(true)}
+              aria-label="Пересоздать уровень или сменить тему"
+              title="Пересоздать уровень / тема"
+              className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-200 transition hover:bg-white/15 lg:hidden"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </button>
+          )}
 
           <button
             type="button"
@@ -377,6 +464,45 @@ export function GameRoom({
           </button>
         </div>
       </header>
+
+      {/* Always-visible Players Nicknames Strip on Mobile & Tablet */}
+      <div
+        role="region"
+        aria-label="Игроки в комнате"
+        className="z-20 flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-white/10 bg-slate-950/40 px-3 py-1.5 backdrop-blur-sm lg:hidden"
+      >
+        {room.players.map((p) => {
+          const isMe = p.playerId === playerId;
+          return (
+            <button
+              key={p.playerId}
+              type="button"
+              onClick={() => setShowPlayersSheet(true)}
+              className={`flex shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-xs transition ${
+                isMe
+                  ? 'border-amber-300/40 bg-amber-400/15 text-amber-100'
+                  : 'border-white/10 bg-white/8 text-slate-200 hover:bg-white/15'
+              }`}
+            >
+              <span
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                  p.online ? 'bg-emerald-400' : 'bg-amber-400/70'
+                }`}
+              />
+              {p.isHost && (
+                <Crown className="h-3 w-3 shrink-0 text-amber-300" aria-hidden="true" />
+              )}
+              <span className="max-w-[110px] truncate font-medium">
+                {p.nickname}
+                {isMe ? ' (вы)' : ''}
+              </span>
+              <span className="text-[11px] text-slate-400 tabular-nums">
+                {p.roundWordsFound}
+              </span>
+            </button>
+          );
+        })}
+      </div>
 
       {/* Main Responsive Workspace */}
       <div className="mx-auto grid min-h-0 w-full max-w-7xl flex-1 grid-cols-1 lg:grid-cols-12 lg:gap-6 lg:p-4">
@@ -560,34 +686,66 @@ export function GameRoom({
               <h2 className="font-display text-sm font-semibold text-white">
                 Игроки ({room.players.length}/4)
               </h2>
-              {isHost && (
-                <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={openRenameModal}
+                className="flex items-center gap-1 rounded-lg bg-white/10 px-2 py-1 text-xs font-medium text-amber-200 hover:bg-white/20 whitespace-nowrap"
+              >
+                <Pencil className="h-3 w-3" />
+                <span>Сменить ник</span>
+              </button>
+            </div>
+            <PlayersList players={room.players} currentPlayerId={playerId} />
+
+            {isHost && (
+              <div className="mt-3 space-y-2 border-t border-white/10 pt-3">
+                <div className="flex items-center justify-between text-xs text-slate-300">
+                  <span>Уровень и тема (хост)</span>
+                  <span className="text-slate-400">#{room.levelNumber}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <select
+                    aria-label="Тема слов"
+                    value={hostTopicChoice}
+                    onChange={(e) =>
+                      setHostTopicChoice(e.target.value as WordTopic)
+                    }
+                    className="h-9 rounded-lg border border-white/15 bg-slate-950/70 px-2 text-xs text-slate-100 focus:outline-none"
+                  >
+                    {WORD_TOPICS.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
                   <select
                     aria-label="Сложность нового уровня"
                     value={hostDiffChoice}
                     onChange={(e) =>
                       setHostDiffChoice(e.target.value as Difficulty)
                     }
-                    className="h-8 rounded-lg border border-white/15 bg-slate-950/70 px-2 text-xs text-slate-100 focus:outline-none"
+                    className="h-9 rounded-lg border border-white/15 bg-slate-950/70 px-2 text-xs text-slate-100 focus:outline-none"
                   >
                     <option value="easy">Лёгкий</option>
                     <option value="medium">Средний</option>
                     <option value="hard">Сложный</option>
                   </select>
-                  <button
-                    type="button"
-                    disabled={loadingNext}
-                    onClick={() => handleNextLevelTrigger(hostDiffChoice)}
-                    title="Сгенерировать новый кроссворд"
-                    className="flex h-8 items-center gap-1 rounded-lg bg-white/10 px-2.5 text-xs font-medium text-white hover:bg-white/20 disabled:opacity-50 whitespace-nowrap"
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                    <span>Новый</span>
-                  </button>
                 </div>
-              )}
-            </div>
-            <PlayersList players={room.players} currentPlayerId={playerId} />
+                <button
+                  type="button"
+                  disabled={loadingNext}
+                  onClick={() =>
+                    handleRecreateLevelTrigger(hostDiffChoice, hostTopicChoice)
+                  }
+                  className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-amber-400 px-3 text-xs font-bold text-slate-950 transition hover:bg-amber-300 disabled:opacity-50 whitespace-nowrap"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${loadingNext ? 'animate-spin' : ''}`} />
+                  <span>
+                    {loadingNext ? 'Создаём сетку...' : 'Пересоздать уровень'}
+                  </span>
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="min-h-0 flex-1">
@@ -620,17 +778,30 @@ export function GameRoom({
                   Игроки ({room.players.length}/4)
                 </h2>
                 <p className="text-xs text-slate-300">
-                  Уровень #{room.levelNumber} · {DIFF_LABELS[room.difficulty]}
+                  Уровень #{room.levelNumber} · {currentTopicLabel} · {DIFF_LABELS[room.difficulty]}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowPlayersSheet(false)}
-                aria-label="Закрыть список игроков"
-                className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-300 hover:bg-white/10"
-              >
-                <X className="h-5 w-5" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPlayersSheet(false);
+                    openRenameModal();
+                  }}
+                  className="flex h-9 items-center gap-1 rounded-xl bg-white/10 px-2.5 text-xs font-medium text-amber-200 hover:bg-white/20"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                  <span>Ник</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPlayersSheet(false)}
+                  aria-label="Закрыть список игроков"
+                  className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-300 hover:bg-white/10"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
             </div>
 
             <div className="py-2">
@@ -640,36 +811,215 @@ export function GameRoom({
             {isHost && (
               <div className="mt-3 space-y-2 border-t border-white/10 pt-3">
                 <p className="text-xs font-medium text-slate-300">
-                  Досрочно сменить кроссворд (хост)
+                  Пересоздать уровень или сменить тему (хост)
                 </p>
-                <div className="flex gap-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <select
+                    aria-label="Тема слов"
+                    value={hostTopicChoice}
+                    onChange={(e) =>
+                      setHostTopicChoice(e.target.value as WordTopic)
+                    }
+                    className="h-11 rounded-xl border border-white/15 bg-slate-950/70 px-3 text-xs text-white"
+                  >
+                    {WORD_TOPICS.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
                   <select
                     aria-label="Сложность"
                     value={hostDiffChoice}
                     onChange={(e) =>
                       setHostDiffChoice(e.target.value as Difficulty)
                     }
-                    className="h-11 flex-1 rounded-xl border border-white/15 bg-slate-950/70 px-3 text-sm text-white"
+                    className="h-11 rounded-xl border border-white/15 bg-slate-950/70 px-3 text-xs text-white"
                   >
                     <option value="easy">Лёгкий</option>
                     <option value="medium">Средний</option>
                     <option value="hard">Сложный</option>
                   </select>
-                  <button
-                    type="button"
-                    disabled={loadingNext}
-                    onClick={async () => {
-                      await handleNextLevelTrigger(hostDiffChoice);
-                      setShowPlayersSheet(false);
-                    }}
-                    className="flex h-11 items-center gap-1.5 rounded-xl bg-amber-400 px-4 text-sm font-bold text-slate-950 whitespace-nowrap"
-                  >
-                    <RefreshCw className="h-4 w-4" />
-                    <span>Новый</span>
-                  </button>
                 </div>
+                <button
+                  type="button"
+                  disabled={loadingNext}
+                  onClick={async () => {
+                    await handleRecreateLevelTrigger(
+                      hostDiffChoice,
+                      hostTopicChoice
+                    );
+                    setShowPlayersSheet(false);
+                  }}
+                  className="flex h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-amber-400 px-4 text-sm font-bold text-slate-950 whitespace-nowrap disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-4 w-4 ${loadingNext ? 'animate-spin' : ''}`} />
+                  <span>
+                    {loadingNext ? 'Создаём сетку...' : 'Пересоздать уровень'}
+                  </span>
+                </button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Rename Nickname Modal */}
+      {showRenameModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Смена ника"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm"
+          onClick={() => setShowRenameModal(false)}
+        >
+          <form
+            onSubmit={handleSubmitRename}
+            className="w-full max-w-sm rounded-3xl border border-white/15 bg-slate-900/95 p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <h2 className="font-display text-base font-bold text-white">
+                Сменить ник
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowRenameModal(false)}
+                aria-label="Закрыть окно смены ника"
+                className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-300 hover:bg-white/10"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <input
+                type="text"
+                maxLength={20}
+                autoFocus
+                value={renameDraft}
+                onChange={(e) => {
+                  setRenameDraft(e.target.value);
+                  setRenameError(null);
+                }}
+                placeholder="Новое имя"
+                className="h-11 w-full rounded-xl border border-white/15 bg-slate-950/70 px-3.5 text-sm text-white placeholder:text-slate-400 focus:border-amber-400 focus:outline-none"
+              />
+              {renameError && (
+                <p className="text-xs text-rose-300">{renameError}</p>
+              )}
+            </div>
+
+            <div className="mt-5 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setShowRenameModal(false)}
+                className="h-11 flex-1 rounded-xl border border-white/15 bg-white/10 text-sm font-semibold text-white hover:bg-white/15"
+              >
+                Отмена
+              </button>
+              <button
+                type="submit"
+                disabled={!renameDraft.trim() || renaming}
+                className="h-11 flex-1 rounded-xl bg-amber-400 text-sm font-bold text-slate-950 hover:bg-amber-300 disabled:opacity-50"
+              >
+                {renaming ? 'Сохраняем...' : 'Сохранить'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Mobile Host Recreate / Theme Modal */}
+      {showRecreateModal && isHost && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Пересоздать уровень"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm lg:hidden"
+          onClick={() => setShowRecreateModal(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-3xl border border-white/15 bg-slate-900/95 p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <h2 className="font-display text-base font-bold text-white">
+                Пересоздать уровень #{room.levelNumber}
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowRecreateModal(false)}
+                aria-label="Закрыть"
+                className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-300 hover:bg-white/10"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-4">
+              <div>
+                <p className="mb-1.5 text-xs font-medium text-slate-300">
+                  Тема слов и фона
+                </p>
+                <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-white/10 bg-slate-950/60 p-1">
+                  {WORD_TOPICS.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => setHostTopicChoice(t.id)}
+                      className={`min-h-[36px] rounded-lg px-2 text-xs font-semibold transition truncate ${
+                        hostTopicChoice === t.id
+                          ? 'bg-amber-400 text-slate-950'
+                          : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <p className="mb-1.5 text-xs font-medium text-slate-300">
+                  Сложность
+                </p>
+                <div className="grid grid-cols-3 gap-1.5 rounded-xl border border-white/10 bg-slate-950/60 p-1">
+                  {(['easy', 'medium', 'hard'] as Difficulty[]).map((diff) => (
+                    <button
+                      key={diff}
+                      type="button"
+                      onClick={() => setHostDiffChoice(diff)}
+                      className={`min-h-[36px] rounded-lg px-2 text-xs font-semibold transition ${
+                        hostDiffChoice === diff
+                          ? 'bg-amber-400 text-slate-950'
+                          : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      {DIFF_LABELS[diff]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={loadingNext}
+                onClick={async () => {
+                  await handleRecreateLevelTrigger(
+                    hostDiffChoice,
+                    hostTopicChoice
+                  );
+                  setShowRecreateModal(false);
+                }}
+                className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-amber-400 text-sm font-bold text-slate-950 hover:bg-amber-300 disabled:opacity-50"
+              >
+                <RefreshCw className={`h-4 w-4 ${loadingNext ? 'animate-spin' : ''}`} />
+                <span>
+                  {loadingNext ? 'Создаём сетку...' : 'Пересоздать уровень'}
+                </span>
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -688,7 +1038,9 @@ export function GameRoom({
         <VictoryModal
           levelNumber={room.levelNumber}
           currentDifficulty={room.difficulty}
+          currentTopic={room.topic}
           players={room.players}
+          currentPlayerId={playerId}
           bonusCount={room.bonusWords.length}
           isHost={isHost}
           onNextLevel={handleNextLevelTrigger}

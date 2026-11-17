@@ -8,20 +8,22 @@ function verifyCrosswordGeometry(cw: GeneratedCrossword): void {
   const cellLetter = new Map<string, string>();
   const cellDirs = new Map<string, Set<'H' | 'V'>>();
 
-  // 1. Check all words are valid dictionary words and formable from wheelLetters
+  // 1. Check all words are valid dictionary words and formable from wheelLetters (е = ё)
   const wheelCounts = new Map<string, number>();
   for (const ch of cw.wheelLetters) {
-    wheelCounts.set(ch, (wheelCounts.get(ch) ?? 0) + 1);
+    const norm = ch === 'ё' ? 'е' : ch;
+    wheelCounts.set(norm, (wheelCounts.get(norm) ?? 0) + 1);
   }
 
   for (const pw of cw.placedWords) {
     assert.ok(isValidRussianWord(pw.word), `Invalid word format: ${pw.word}`);
     assert.ok(dict.has(pw.word), `Word not in dictionary: ${pw.word}`);
 
-    // Verify multiset containment (strictly distinguishing е and ё)
+    // Verify multiset containment (е = ё)
     const wCounts = new Map<string, number>();
     for (const ch of pw.word) {
-      wCounts.set(ch, (wCounts.get(ch) ?? 0) + 1);
+      const norm = ch === 'ё' ? 'е' : ch;
+      wCounts.set(norm, (wCounts.get(norm) ?? 0) + 1);
     }
     for (const [ch, cnt] of wCounts.entries()) {
       assert.ok(
@@ -132,25 +134,29 @@ function runTests(): void {
   const dict = getDictionary();
   console.log(`Dictionary loaded: ${dict.entries.length} words`);
   assert.ok(
-    dict.entries.length >= 10000 && dict.entries.length <= 25000,
-    `Expected 10k-25k words, got ${dict.entries.length}`
+    dict.entries.length >= 9000 && dict.entries.length <= 15000,
+    `Expected clean 9k-15k words (no tier 3), got ${dict.entries.length}`
+  );
+  assert.ok(
+    dict.entries.every((e) => e.tier <= 2),
+    'All dictionary entries must be tier 1 or 2'
   );
 
-  // Test strict Е vs Ё distinction
+  // Test Е = Ё equivalence
   assert.ok(dict.has('ёлка'), 'ёлка must be in dictionary');
-  assert.ok(!dict.has('елка'), 'елка must NOT be in dictionary (requires ё)');
+  assert.ok(dict.has('елка'), 'елка must also be accepted when е = ё');
   assert.ok(dict.has('мёд'), 'мёд must be in dictionary');
-  assert.ok(!dict.has('мед'), 'мед must NOT be in dictionary (requires ё)');
+  assert.ok(dict.has('мед'), 'мед must also be accepted when е = ё');
   assert.ok(dict.has('самолёт'), 'самолёт must be in dictionary');
-  assert.ok(!dict.has('самолет'), 'самолет must NOT be in dictionary');
+  assert.ok(dict.has('самолет'), 'самолет must also be accepted when е = ё');
   assert.ok(dict.has('ножницы'), 'ножницы (plurale tantum) must be in dictionary');
 
-  // Verify subword search keeps е and ё separate
+  // Verify subword search treats е and ё as equivalent
   const subNoYo = dict.findSubwords('домосед').map((e) => e.word);
-  assert.ok(!subNoYo.includes('мёд'), 'домосед (only е) must NOT form мёд');
+  assert.ok(subNoYo.includes('мед'), 'домосед must form мед/мёд when е = ё');
   const subWithYo = dict.findSubwords('самолёт').map((e) => e.word);
-  assert.ok(subWithYo.includes('самолёт'), 'самолёт must form самолёт');
-  assert.ok(!subWithYo.includes('лето'), 'самолёт has ё, not е, so cannot form лето');
+  assert.ok(subWithYo.includes('самолет'), 'самолёт must form самолёт/самолет');
+  assert.ok(subWithYo.includes('лето'), 'самолёт must form лето when е = ё');
 
   const difficulties: Difficulty[] = ['easy', 'medium', 'hard'];
   const expectedRanges: Record<Difficulty, [number, number]> = {
@@ -183,6 +189,17 @@ function runTests(): void {
       `[${diff}] 15/15 valid | words: ${Math.min(...wordCounts)}-${Math.max(...wordCounts)} | avg: ${avgMs}ms | max: ${maxMs}ms`
     );
   }
+
+  // Test all thematic filters across all difficulties
+  const topics = ['summer', 'nature', 'travel', 'home', 'science'] as const;
+  for (const topic of topics) {
+    for (const diff of difficulties) {
+      const cw = generateCrossword(diff, dict, { topic });
+      verifyCrosswordGeometry(cw);
+      assert.equal(cw.topic, topic);
+    }
+  }
+  console.log('ALL THEMATIC CROSSWORD FILTERS PASSED');
 
   console.log('ALL CROSSWORD & DICTIONARY TESTS PASSED');
 }

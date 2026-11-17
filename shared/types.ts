@@ -1,5 +1,22 @@
 export type Difficulty = 'easy' | 'medium' | 'hard';
 
+export type WordTopic =
+  | 'all'
+  | 'summer'
+  | 'nature'
+  | 'travel'
+  | 'home'
+  | 'science';
+
+export const WORD_TOPICS: Array<{ id: WordTopic; label: string }> = [
+  { id: 'all', label: 'Все слова' },
+  { id: 'summer', label: 'Лето' },
+  { id: 'nature', label: 'Природа' },
+  { id: 'travel', label: 'Путешествия' },
+  { id: 'home', label: 'Дом и уют' },
+  { id: 'science', label: 'Космос и наука' },
+];
+
 export type WordDirection = 'H' | 'V';
 
 export interface GridCellView {
@@ -46,6 +63,7 @@ export interface ChatMessage {
 export interface RoomStatePayload {
   code: string;
   difficulty: Difficulty;
+  topic: WordTopic;
   levelNumber: number;
   wheelLetters: string[];
   grid: {

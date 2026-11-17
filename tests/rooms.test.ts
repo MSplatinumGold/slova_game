@@ -99,16 +99,33 @@ function runRoomTests(): void {
   assert.ok(completedByHint, 'Hints must auto-complete words and finish round');
 
   // 6. Host launches next level
-  const nextRes = rm.nextLevel('sock-2', 'hard');
+  const nextRes = rm.nextLevel('sock-2', 'hard', 'summer');
   assert.ok(nextRes.ok);
   assert.equal(nextRes.state.levelNumber, 2);
   assert.equal(nextRes.state.difficulty, 'hard');
+  assert.equal(nextRes.state.topic, 'summer');
   assert.equal(nextRes.state.sharedHints, 3);
   assert.equal(nextRes.state.roundComplete, false);
 
-  // 7. Chat sanitization
+  // 7. Player renames nickname in-room
+  const renameRes = rm.renamePlayer('sock-3', 'Верочка');
+  assert.ok(renameRes.ok);
+  assert.equal(
+    renameRes.state.players.find((p) => p.playerId === 'p3')?.nickname,
+    'Верочка'
+  );
+
+  // 8. Host recreates current level without leaving room (keeps levelNumber, switches topic)
+  const recreateRes = rm.recreateLevel('sock-2', 'medium', 'nature');
+  assert.ok(recreateRes.ok);
+  assert.equal(recreateRes.state.levelNumber, 2);
+  assert.equal(recreateRes.state.difficulty, 'medium');
+  assert.equal(recreateRes.state.topic, 'nature');
+  assert.equal(recreateRes.state.roundComplete, false);
+
+  // 9. Chat sanitization
   assert.equal(sanitizeText('  <script>alert(1)</script>Привет  ', 240), 'scriptalert(1)/scriptПривет');
-  assert.ok(dict.entries.length > 10000);
+  assert.ok(dict.entries.length >= 9000);
 
   console.log('ALL ROOM & MULTIPLAYER LOGIC TESTS PASSED');
 }
